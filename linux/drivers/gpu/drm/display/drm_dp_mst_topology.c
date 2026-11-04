@@ -2245,8 +2245,10 @@ static void build_mst_prop_path(const struct drm_dp_mst_branch *mstb,
 int drm_dp_mst_connector_late_register(struct drm_connector *connector,
 				       struct drm_dp_mst_port *port)
 {
+	/* Haiku: connectors have no sysfs device */
 	drm_dbg_kms(port->mgr->dev, "registering %s remote bus for %s\n",
-		    port->aux.name, connector->kdev->kobj.name);
+		    port->aux.name, connector->kdev != NULL
+			? connector->kdev->kobj.name : connector->name);
 
 	port->aux.dev = connector->kdev;
 	return drm_dp_aux_register_devnode(&port->aux);
@@ -2266,7 +2268,8 @@ void drm_dp_mst_connector_early_unregister(struct drm_connector *connector,
 					   struct drm_dp_mst_port *port)
 {
 	drm_dbg_kms(port->mgr->dev, "unregistering %s remote bus for %s\n",
-		    port->aux.name, connector->kdev->kobj.name);
+		    port->aux.name, connector->kdev != NULL
+			? connector->kdev->kobj.name : connector->name);
 	drm_dp_aux_unregister_devnode(&port->aux);
 }
 EXPORT_SYMBOL(drm_dp_mst_connector_early_unregister);
