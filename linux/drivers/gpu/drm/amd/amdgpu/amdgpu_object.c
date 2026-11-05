@@ -25,8 +25,8 @@
  */
 /*
  * Changed for air/OS (Haiku), 2026: write-combined GTT support on Haiku
- * (haiku_uswc). The changes are in the history of
- * https://github.com/jmgasper/linux-drm
+ * (haiku_uswc); dumb buffers contiguous in VRAM from their creation. The
+ * changes are in the history of https://github.com/jmgasper/linux-drm
  */
 /*
  * Authors:
@@ -146,6 +146,20 @@ void amdgpu_bo_placement_from_domain(struct amdgpu_bo *abo, u32 domain)
 		if (abo->tbo.type == ttm_bo_type_kernel &&
 		    flags & AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS)
 			places[c].flags |= TTM_PL_FLAG_CONTIGUOUS;
+#ifdef __HAIKU_LINUX_COMPAT__
+		/* Haiku: contiguous is a must for user BOs too, as before Linux
+		 * 6.10. They only have the flag as dumb buffers (amdgpu_kms' frame
+		 * buffers; user space cannot ask for it) or once they were a
+		 * scanout frame buffer. Otherwise a dumb buffer created while VRAM
+		 * is full gets scattered pages without evicting anything, and
+		 * pinning it for scanout then has to move it into a contiguous
+		 * range that its own pages break up: a third 4K monitor plugged
+		 * into a dock failed with -ENOMEM on the Framework 13 (512 MB of
+		 * VRAM). Linux scans out of GTT there instead, which needs
+		 * write-combined GTT (haiku_uswc, off). */
+		if (flags & AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS)
+			places[c].flags |= TTM_PL_FLAG_CONTIGUOUS;
+#endif
 
 		c++;
 	}
