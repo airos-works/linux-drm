@@ -42,6 +42,11 @@
 
 #include "../include/lx/haiku.h"
 
+// the add-on's name (the Makefile's): "amdgpu_drm" or "amdxdna"
+#ifndef LX_DRIVER_NAME
+#	define LX_DRIVER_NAME "amdgpu_drm"
+#endif
+
 
 static_assert(sizeof(mutex) <= LX_HAIKU_MUTEX_SIZE, "mutex storage");
 static_assert(sizeof(rw_lock) <= LX_HAIKU_RWLOCK_SIZE, "rw_lock storage");
@@ -68,7 +73,7 @@ static const int kLinuxESRCH = 3;
 static int sLogFile = -1;
 static off_t sLogPosition;
 static off_t sLogSize;
-static mutex sLogFileLock = MUTEX_INITIALIZER("amdgpu_drm log file");
+static mutex sLogFileLock = MUTEX_INITIALIZER(LX_DRIVER_NAME " log file");
 
 
 extern "C" int
@@ -136,7 +141,7 @@ static size_t sRawFill;
 static char* sRawBlock;
 static const size_t kRawBlockSize = 4096;
 static thread_id sRawThread = -1;
-static mutex sRawLock = MUTEX_INITIALIZER("amdgpu_drm raw log");
+static mutex sRawLock = MUTEX_INITIALIZER(LX_DRIVER_NAME " raw log");
 
 
 extern "C" int
@@ -311,7 +316,7 @@ extern "C" void
 lx_haiku_dump_stack(void)
 {
 	// The kernel debugger's "bt" needs a KDL session; leave a marker.
-	dprintf("amdgpu: (stack trace not available)\n");
+	dprintf(LX_DRIVER_NAME ": (stack trace not available)\n");
 }
 
 
@@ -1161,6 +1166,41 @@ lx_haiku_pages_free(void* firstPage, unsigned long count)
 		DEBUG_PAGE_ACCESS_START(current);
 		vm_page_free(NULL, current);
 	}
+}
+
+
+extern "C" void*
+lx_haiku_page_run_alloc(unsigned long count, unsigned long long alignment,
+	unsigned long long* physical)
+{
+	physical_address_restrictions restrictions = {};
+	restrictions.alignment = alignment;
+	// user priority: a large run must not eat into the pages the system
+	// keeps for itself
+	vm_page* page = vm_page_allocate_page_run(
+		PAGE_STATE_WIRED | VM_PAGE_ALLOC_CLEAR, count, &restrictions,
+		VM_PRIORITY_USER);
+	if (page == NULL)
+		return NULL;
+	// see lx_haiku_pages_alloc()
+	for (unsigned long i = 0; i < count; i++)
+		DEBUG_PAGE_ACCESS_END(&page[i]);
+	*physical = (unsigned long long)page->physical_page_number * B_PAGE_SIZE;
+	return page;
+}
+
+
+extern "C" void
+lx_haiku_page_run_free(void* run, unsigned long count)
+{
+	lx_haiku_pages_free(run, count);
+}
+
+
+extern "C" unsigned int
+lx_haiku_current_euid(void)
+{
+	return geteuid();
 }
 
 

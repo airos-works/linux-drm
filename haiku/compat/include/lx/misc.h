@@ -902,9 +902,13 @@ struct dev_pagemap {
 	pages that stay wired for the buffer's life, and its "pfns" are their
 	struct pages. */
 struct hmm_range {
+	struct mmu_interval_notifier *notifier;
+	unsigned long notifier_seq;
 	unsigned long start;
 	unsigned long end;
 	unsigned long *hmm_pfns;
+	unsigned long default_flags;
+	unsigned long pfn_flags_mask;
 	void *dev_private_owner;
 };
 #define hmm_pfn_to_page(pfn)	((struct page *)(pfn))

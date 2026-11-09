@@ -113,6 +113,9 @@ struct pci_dev {
 	struct pci_driver *driver;
 	void *lx_haiku;			/* Haiku's pci_info and module */
 	unsigned int lx_irq_count;
+	/* MSI-X: the table, and what its entries were set to */
+	void __iomem *lx_msix_table;
+	u32 *lx_msix_saved;
 };
 
 struct pci_bus {
@@ -297,7 +300,9 @@ int pci_irq_vector(struct pci_dev *dev, unsigned int nr);
 #define pci_enable_msi(dev)		pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI)
 #define pci_disable_msi(dev)	pci_free_irq_vectors(dev)
 #define pci_dev_msi_enabled(dev)	((dev)->msi_enabled || (dev)->msix_enabled)
-#define pci_msix_vec_count(dev)	0
+#define pci_msix_vec_count(dev)	lx_pci_msix_vec_count(dev)
+int lx_pci_msix_vec_count(struct pci_dev *dev);
+int lx_pci_msix_restore(struct pci_dev *dev);
 enum pci_bus_speed pcie_get_speed_cap(struct pci_dev *dev);
 enum pcie_link_width pcie_get_width_cap(struct pci_dev *dev);
 u32 pcie_bandwidth_available(struct pci_dev *dev, struct pci_dev **limiting_dev,

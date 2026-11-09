@@ -18,6 +18,14 @@ fput(struct file *file)
 	if (atomic_long_dec_and_test(&file->f_count)) {
 		if (file->f_op != NULL && file->f_op->release != NULL)
 			file->f_op->release(file->f_inode, file);
+		/* a file of a pseudo file system (alloc_file_pseudo()): its
+		 * directory entry goes with it */
+		if (file->f_path.dentry != NULL) {
+			struct dentry *dentry = file->f_path.dentry;
+			if (dentry->d_op != NULL && dentry->d_op->d_release != NULL)
+				dentry->d_op->d_release(dentry);
+			kfree(dentry);
+		}
 		kfree(file->f_inode);
 		kfree(file);
 	}

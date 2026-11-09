@@ -489,7 +489,7 @@ void lx_kfree_rcu(void *object, struct rcu_head *head);
 DEFINE_LOCK_GUARD_0(rcu, rcu_read_lock(), rcu_read_unlock())
 
 /* SRCU: the same as RCU */
-struct srcu_struct { int dummy; };
+struct srcu_struct { int readers; };
 #define DEFINE_SRCU(name)			struct srcu_struct name
 #define DEFINE_STATIC_SRCU(name)	static struct srcu_struct name
 #define init_srcu_struct(s)			0

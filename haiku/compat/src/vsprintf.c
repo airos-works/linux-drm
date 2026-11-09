@@ -583,7 +583,7 @@ _dev_printk(const char *level, const struct device *dev, const char *fmt, ...)
 	va_start(args, fmt);
 	vaf.fmt = fmt;
 	vaf.va = &args;
-	_printk("%s%s %s: %pV", level, "amdgpu",
+	_printk("%s%s %s: %pV", level, KBUILD_MODNAME,
 		dev != NULL ? dev_name(dev) : "(no device)", &vaf);
 	va_end(args);
 }

@@ -10,7 +10,7 @@
 #include <lx/haiku.h>
 
 
-struct module lx_this_module = { .name = "amdgpu" };
+struct module lx_this_module = { .name = KBUILD_MODNAME };
 
 
 /* #pragma mark - devres */
@@ -619,7 +619,7 @@ load_firmware(const struct firmware **_fw, const char *name, bool warn)
 	}
 	kfree(fw);
 	if (warn)
-		pr_warn("amdgpu: firmware %s not found\n", name);
+		pr_warn(KBUILD_MODNAME ": firmware %s not found\n", name);
 	return -ENOENT;
 }
 

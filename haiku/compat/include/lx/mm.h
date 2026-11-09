@@ -193,10 +193,22 @@ static inline __alloc_size(2, 3) void *krealloc_array(void *p, size_t new_n,
 #define vcalloc(n, size)			vzalloc(array_size(n, size))
 #define vfree(p)					lx_vfree(p)
 #define kmalloc_size_roundup(size)	(size)
-#define kmalloc_obj(p, gfp)			kmalloc(sizeof(*(p)), gfp)
-#define kzalloc_obj(p, gfp)			kzalloc(sizeof(*(p)), gfp)
-#define kmalloc_objs(p, n, gfp)		kmalloc_array(n, sizeof(*(p)), gfp)
-#define kzalloc_objs(p, n, gfp)		kcalloc(n, sizeof(*(p)), gfp)
+/* typed allocations; the allocation flags may be left out (newer Linux) */
+#define lx_default_gfp(...)			__lx_default_gfp(, ##__VA_ARGS__, GFP_KERNEL)
+#define __lx_default_gfp(empty, gfp, ...)	(gfp)
+#define kmalloc_obj(p, ...) \
+	((typeof(p) *)kmalloc(sizeof(typeof(p)), lx_default_gfp(__VA_ARGS__)))
+#define kzalloc_obj(p, ...) \
+	((typeof(p) *)kzalloc(sizeof(typeof(p)), lx_default_gfp(__VA_ARGS__)))
+#define kmalloc_objs(p, n, ...) \
+	((typeof(p) *)kmalloc_array(n, sizeof(typeof(p)), lx_default_gfp(__VA_ARGS__)))
+#define kzalloc_objs(p, n, ...) \
+	((typeof(p) *)kcalloc(n, sizeof(typeof(p)), lx_default_gfp(__VA_ARGS__)))
+#define kvzalloc_objs(p, n, ...) \
+	((typeof(p) *)kvcalloc(n, sizeof(typeof(p)), lx_default_gfp(__VA_ARGS__)))
+#define kzalloc_flex(p, member, n, ...) \
+	((typeof(p) *)kzalloc(struct_size_t(typeof(p), member, n), \
+		lx_default_gfp(__VA_ARGS__)))
 #define kmemleak_alloc(ptr, size, min, gfp)	do { } while (0)
 #define kmemleak_free(ptr)			do { } while (0)
 #define kmemleak_ignore(ptr)		do { } while (0)
@@ -553,6 +565,7 @@ struct mm_struct {
 	atomic_t mm_users;
 	atomic_t mm_count;
 	unsigned long total_vm;
+	atomic64_t pinned_vm;
 	int lx_team;
 	struct list_head lx_link;	/* in the table of teams' mms */
 };
@@ -861,7 +874,16 @@ u64 dma_get_mask(struct device *dev);
 #define dma_is_direct(ops)			true
 #define get_dma_ops(dev)			NULL
 #define device_iommu_mapped(dev)	false
-struct iommu_domain { unsigned type; };
+struct iommu_domain_geometry {
+	dma_addr_t aperture_start;
+	dma_addr_t aperture_end;
+	bool force_aperture;
+};
+struct iommu_domain {
+	unsigned type;
+	unsigned long pgsize_bitmap;
+	struct iommu_domain_geometry geometry;
+};
 #define iommu_get_domain_for_dev(dev)	((struct iommu_domain *)NULL)
 #define iommu_present(bus)			false
 #define IOMMU_DOMAIN_IDENTITY		1

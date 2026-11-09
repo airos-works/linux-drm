@@ -156,6 +156,17 @@ int lx_haiku_team_watch(lx_thread_id team, void (*hook)(lx_thread_id, void *),
 int lx_haiku_team_unwatch(lx_thread_id team,	/* 0: removed before it ran */
 	void (*hook)(lx_thread_id, void *), void *data);
 
+/* A run of wired pages, contiguous in physical memory and starting at a
+   multiple of "alignment" bytes (a power of two, or 0), for a device that is
+   given physical addresses. Not mapped anywhere. Returns a handle for
+   lx_haiku_page_run_free(), or NULL. */
+void *lx_haiku_page_run_alloc(unsigned long count, unsigned long long alignment,
+	unsigned long long *physical);
+void lx_haiku_page_run_free(void *run, unsigned long count);
+
+/* the effective user ID of the calling team */
+unsigned int lx_haiku_current_euid(void);
+
 /* files: the whole file in a new malloc() block */
 int lx_haiku_read_file(const char *path, void **data, unsigned long *size);
 
@@ -186,6 +197,11 @@ void lx_haiku_pci_write(int bus, int device, int function, int offset,
 /* one MSI vector; returns the interrupt vector or a negative error */
 int lx_haiku_pci_enable_msi(int bus, int device, int function);
 void lx_haiku_pci_disable_msi(int bus, int device, int function);
+/* MSI-X: how many vectors the device has; "count" of them enabled, with
+   the first one's interrupt vector returned (the others follow it), or a
+   negative error. lx_haiku_pci_disable_msi() ends MSI-X too. */
+int lx_haiku_pci_msix_count(int bus, int device, int function);
+int lx_haiku_pci_enable_msix(int bus, int device, int function, int count);
 
 /* ACPI firmware tables (signature, 1 for the first instance); the table
    stays mapped */

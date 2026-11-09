@@ -31,5 +31,6 @@
 #include <lx/pci.h>
 #include <lx/fs.h>
 #include <lx/misc.h>
+#include <lx/accel.h>
 
 #endif /* _LX_ALL_H */

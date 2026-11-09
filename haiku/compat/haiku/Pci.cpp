@@ -127,6 +127,35 @@ lx_haiku_pci_disable_msi(int bus, int device, int function)
 }
 
 
+extern "C" int
+lx_haiku_pci_msix_count(int bus, int device, int function)
+{
+	pci_module_info* pci = pci_module();
+	if (pci == NULL)
+		return 0;
+	return pci->get_msix_count(bus, device, function);
+}
+
+
+extern "C" int
+lx_haiku_pci_enable_msix(int bus, int device, int function, int count)
+{
+	pci_module_info* pci = pci_module();
+	uint32 vector;
+	if (pci == NULL || count < 1
+		|| pci->get_msix_count(bus, device, function) < (uint32)count)
+		return -kLinuxENODEV;
+	if (pci->configure_msix(bus, device, function, count, &vector) != B_OK)
+		return -kLinuxEIO;
+	if (pci->enable_msix(bus, device, function) != B_OK) {
+		// unconfigures MSI-X when that is what is configured
+		pci->unconfigure_msi(bus, device, function);
+		return -kLinuxEIO;
+	}
+	return vector;
+}
+
+
 struct InterruptHook {
 	uint32	vector;
 	void	(*function)(void*);

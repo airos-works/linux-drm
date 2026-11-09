@@ -61,3 +61,11 @@
 #define CONFIG_DRM_AMD_DC_FP 1
 #define CONFIG_DRM_AMD_DC_SI 1
 
+
+/* The AMD NPU add-on (make amdxdna, haiku/amdxdna): compute accelerator
+ * nodes in the DRM core and the driver. Not in amdgpu_drm. */
+#ifdef LX_ADDON_AMDXDNA
+#define CONFIG_DRM_ACCEL 1
+#define CONFIG_DRM_ACCEL_AMDXDNA 1
+#define CONFIG_DRM_GEM_SHMEM_HELPER 1
+#endif
