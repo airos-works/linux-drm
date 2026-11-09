@@ -5,7 +5,9 @@ This repository holds code under more than one licence.
 
 linux/
     The sources of Linux 6.18.52 this port compiles, imported unchanged
-    (tools/import-linux.sh). The few files the port changed afterwards say so
+    (tools/import-linux.sh), and Linux 7.4-rc2's AMD NPU driver
+    (linux/drivers/accel/amdxdna with its UAPI and trace headers,
+    tools/import-amdxdna.sh; GPL-2.0). The few files the port changed afterwards say so
     after their licence block, and the changes are in the git history. Every
     file keeps its own licence, named by its SPDX-License-Identifier line or
     written out in its header: most of DRM and amdgpu is MIT, TTM is
@@ -19,16 +21,19 @@ haiku/, tools/
     the MIT licence below, unless a file says otherwise
     (haiku/compat/include/linux/string.h is GPL-2.0).
 
-The amdgpu_drm kernel add-on
-    Built from both, it is a combined work distributed under the GNU General
-    Public License, version 2 (linux/LICENSES/preferred/GPL-2.0). This
-    repository is its complete source; haiku/build/Makefile builds it.
+The amdgpu_drm and amdxdna kernel add-ons
+    Built from both, each is a combined work distributed under the GNU
+    General Public License, version 2 (linux/LICENSES/preferred/GPL-2.0).
+    This repository is their complete source; haiku/build/Makefile builds
+    them.
 
 Firmware
     This repository holds no firmware. The amdgpu_firmwares package that
     haiku/tools/package.sh makes carries the amdgpu files of linux-firmware
     unchanged, under their own licence (LICENSE.amdgpu, which the package
-    installs as "AMD GPU Firmware").
+    installs as "AMD GPU Firmware"). Likewise the amdnpu_firmwares package
+    of haiku/tools/package-amdxdna.sh: the amdnpu files, under
+    LICENSE.amdnpu ("AMD NPU Firmware").
 
 
 The MIT licence (haiku/, tools/)
