@@ -12,6 +12,26 @@
 /* #pragma mark - spinlocks and mutexes */
 
 
+/*	Waits for a lock that another thread is initializing right now: a few
+	instructions, unless that thread lost the CPU in the middle of them.
+	Then it has to get it back: a thread of a higher priority that only
+	spun here - an interrupt thread that was woken on the same CPU - kept it
+	from running for ever (Haiku moves a ready thread to no other CPU), and
+	with it everything else in that CPU's queue. So after a few looks the
+	wait sleeps. */
+static void
+lx_lock_wait_ready(int *state)
+{
+	int spins = 0;
+	while (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2) {
+		if (++spins < 64)
+			cpu_relax();
+		else
+			lx_haiku_snooze(20);
+	}
+}
+
+
 static void
 lx_lock_init_slow(struct lx_lock *lock)
 {
@@ -23,8 +43,7 @@ lx_lock_init_slow(struct lx_lock *lock)
 		return;
 	}
 	/* another thread is initializing it */
-	while (__atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) != 2)
-		cpu_relax();
+	lx_lock_wait_ready(&lock->state);
 }
 
 
@@ -165,8 +184,7 @@ rwsem_ensure(struct rw_semaphore *sem)
 		__atomic_store_n(&sem->state, 2, __ATOMIC_RELEASE);
 		return;
 	}
-	while (__atomic_load_n(&sem->state, __ATOMIC_ACQUIRE) != 2)
-		cpu_relax();
+	lx_lock_wait_ready(&sem->state);
 }
 
 
