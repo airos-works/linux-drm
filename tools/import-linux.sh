@@ -16,6 +16,9 @@ cd "$SRC"
 	find drivers/gpu/drm/amd -type f \( -name '*.[ch]' -o -name 'Makefile' \
 		-o -name '*.S' \) -not -path '*/amdkfd/*' -not -path '*/tests/*'
 	find drivers/gpu/drm/amd/amdkfd -type f -name '*.h'
+	# compute accelerator nodes (for the AMD NPU driver, which
+	# tools/import-amdxdna.sh imports from a newer Linux)
+	echo drivers/accel/drm_accel.c
 	# fences, reservation objects, dma-buf and sync files
 	find drivers/dma-buf -maxdepth 1 -type f -name '*.[ch]'
 	# DRM headers, their UAPI, and the Linux headers of the subsystems above

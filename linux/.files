@@ -1,4 +1,5 @@
 COPYING
+drivers/accel/drm_accel.c
 drivers/dma-buf/dma-buf.c
 drivers/dma-buf/dma-buf-sysfs-stats.c
 drivers/dma-buf/dma-buf-sysfs-stats.h
