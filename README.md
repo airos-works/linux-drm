@@ -112,8 +112,15 @@ start after a boot, and while it exists the NPU is not started.
 **Tests.** `haiku/tests/xdna_test.c` (C, no XRT): `info` prints the NPU's
 geometry and versions, `buffers` exercises buffer objects and mappings, `run
 <dir>` loads a design (raw PDI and instruction sequence, as mlir-aie's aiecc
-writes them) and runs it against expected output; `haiku/tests/xdna/` builds
-such designs on a Linux host. Without an NPU: `haiku_selftest 1` in the
+writes them) and runs it against expected output.
+`haiku/tests/xdna/build-designs.sh` builds two such designs on a Linux host
+from mlir-aie's examples with its pip wheels (no XRT, no Vitis), for one
+column of the NPU of Strix and Krackan Point: `passthrough_kernel` (output =
+input) and `conv2d` (a 1x1 int8 convolution, 32x32, 64 to 64 channels);
+`reference.py` there makes the inputs and the expected outputs and checks a
+captured output (`xdna_test -o`). The convolution's expected output follows
+the kernel's source; whether the NPU rounds exact halves the same way shows
+only on hardware (`reference.py check` says if mismatches are such halves). Without an NPU: `haiku_selftest 1` in the
 settings runs the driver's checks of the compat layer when it is loaded,
 `haiku_selftest 2` makes the node a device without hardware, on which
 `xdna_test buffers` runs (`ADDON=amdxdna haiku/tools/qemu-vm.sh selftest`).

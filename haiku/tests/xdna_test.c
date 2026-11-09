@@ -15,12 +15,18 @@
 		data buffers, their mappings and what becomes of them. Needs no NPU
 		behind the node: also runs on the device without hardware of a
 		virtual machine (driver settings: "haiku_selftest 2").
-	xdna_test [-d <device>] [-t <ms>] [-n <runs>] [-o <file>] run <design dir>
+	xdna_test [-d <device>] [-t <ms>] [-n <runs>] [-o <file>] [-b]
+			run <design dir>
 		loads a design and runs it: <design dir>/manifest.txt names the
 		configuration (a raw PDI, as mlir-aie's aiecc writes it), the
 		instruction sequence and the buffers with their contents, the
 		expected output among them (haiku/tests/xdna/build-designs.sh makes
-		such directories). -o keeps the first output buffer of the last run.
+		such directories). -o keeps the first output buffer of the first
+		run (for "reference.py check"). -b passes the size of the
+		instruction sequence in bytes, as mlir-aie's Python host code does;
+		the default is in words, as its C++ tests do.
+
+	"buffers" counts the free buffer memory before and after: run it alone.
 
 	Without an IOMMU the addresses the NPU is given are physical ones: what
 	DRM_IOCTL_AMDXDNA_GET_BO_INFO returns as xdna_addr for a data buffer goes
@@ -621,7 +627,7 @@ compare(const struct design_buffer *buffer, const char *name)
 
 static void
 run_design(const char *directory, unsigned timeout, int runs,
-	const char *outputFile)
+	const char *outputFile, int sizeInBytes)
 {
 	struct amdxdna_drm_query_aie_metadata metadata;
 	struct amdxdna_qos_info qos = { .priority = AMDXDNA_QOS_NORMAL_PRIORITY };
@@ -739,7 +745,7 @@ run_design(const char *directory, unsigned timeout, int runs,
 		command[1 + count++] = 0;
 		command[1 + count++] = (uint32_t)insts.xdna_addr;
 		command[1 + count++] = (uint32_t)(insts.xdna_addr >> 32);
-		command[1 + count++] = instsSize / 4;
+		command[1 + count++] = sizeInBytes ? instsSize : instsSize / 4;
 		for (i = 0; i < MAX_BUFFERS; i++) {
 			uint64_t address = i < design.buffer_count
 				? design.buffers[i].bo.xdna_addr : 0;
@@ -817,21 +823,23 @@ main(int argc, char **argv)
 	const char *outputFile = NULL;
 	unsigned timeout = 10000;
 	int runs = 1;
+	int sizeInBytes = 0;
 	int option;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	while ((option = getopt(argc, argv, "d:t:n:o:")) != -1) {
+	while ((option = getopt(argc, argv, "d:t:n:o:b")) != -1) {
 		switch (option) {
 			case 'd': device = optarg; break;
 			case 't': timeout = strtoul(optarg, NULL, 0); break;
 			case 'n': runs = atoi(optarg); break;
 			case 'o': outputFile = optarg; break;
+			case 'b': sizeInBytes = 1; break;
 			default: argc = 0; break;
 		}
 	}
 	if (optind >= argc) {
 		printf("usage: xdna_test [-d <device>] info | buffers | "
-			"[-t <ms>] [-n <runs>] [-o <file>] run <design dir>\n");
+			"[-t <ms>] [-n <runs>] [-o <file>] [-b] run <design dir>\n");
 		return 2;
 	}
 
@@ -847,7 +855,7 @@ main(int argc, char **argv)
 	else if (!strcmp(argv[optind], "buffers"))
 		test_buffers();
 	else if (!strcmp(argv[optind], "run") && optind + 1 < argc)
-		run_design(argv[optind + 1], timeout, runs, outputFile);
+		run_design(argv[optind + 1], timeout, runs, outputFile, sizeInBytes);
 	else {
 		printf("unknown command %s\n", argv[optind]);
 		return 2;
