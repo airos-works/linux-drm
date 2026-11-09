@@ -1,9 +1,14 @@
 # First load of amdxdna on the Framework 13 (Ryzen AI 5 340)
 
-Nothing below has run on an NPU yet. Do it with the owner at the machine:
-there is no remote power control, and the steps from 4 on start hardware
-for the first time. Stop at the first step whose check fails and keep the
-syslog (`/var/log/syslog`, lines with `amdxdna`).
+State on 2026-11-09 (firmware 1.1.2.64, 8 columns, 6 rows): steps 3 to 5
+have passed on the laptop, the NPU powered up and down some ten times, and
+the convolution's output was the expected one byte for byte: the NPU rounds
+exact halves away from zero, as the kit does. Then the laptop stopped
+answering at the start of one more `xdna_test run` (cause not known yet; see
+"If the machine stops"). Step 6, the memory taken at load and the launch job
+have run in a virtual machine only. There is no remote power control: have
+somebody at the machine. Stop at the first step whose check fails and keep
+the syslog (`/var/log/syslog`, lines with `amdxdna`) and the log file.
 
 Host paths are those of the build server; `$L` is the laptop
 (`FW_URL=http://<laptop>:7780/mcp`, `fw13/tools/fwput`, `fwsh`), `$NP` is
@@ -44,15 +49,18 @@ haiku/tests/xdna/build-designs.sh                    # designs/passthrough_kerne
       as `.../npu.sbin` (or install the `amdnpu_firmwares` package)
 - [ ] `~/xdna/`: `xdna_test`, `designs/`, `bundles/`, `reference.py`,
       `amdxdna_backend_test`
-- [ ] optional, for a log that survives a hang:
+- [ ] for a log that survives a hang:
       `dd if=/dev/zero of=/boot/home/amdxdna.log bs=1M count=4` and
       `log_file /boot/home/amdxdna.log` in
       `~/config/settings/kernel/drivers/amdxdna`
+- [ ] the launch job that loads the driver at every boot (the package has it
+      in `data/launch`): `haiku/amdxdna/launch` as
+      `$NP/data/launch/amdxdna`
 - [ ] the kit: `libneural.so` to `$NP/lib/`, `neural` to `$NP/bin/`,
       `amdxdna.neural` to `$NP/add-ons/neural/` (skip what the installed
       system already has)
 
-## 3. The driver (loads, touches no hardware)
+## 3. The driver (loads, takes its memory, touches no hardware)
 
 Never copy a new file straight into a drivers directory: stage it outside
 and move it in.
@@ -64,20 +72,29 @@ ln -sf ../../bin/amdxdna $NP/add-ons/kernel/drivers/dev/npu/amdxdna
 mv /boot/home/amdxdna.staged $NP/add-ons/kernel/drivers/bin/amdxdna
 ```
 
-- [ ] syslog: `amdxdna: NPU 1022:17f0 rev 20 at 194:0.1: /dev/npu/amdxdna/0 starts it when opened`
+- [ ] syslog: `amdxdna: NPU 1022:17f0 rev 20 at 194:0.1: /dev/npu/amdxdna/0 starts it when opened`,
+      then `amdxdna: buffer memory: 128 MiB at 0x… (found in … ms)`. On a
+      machine that has been up for hours: `no … MiB of contiguous memory
+      free` for each size and `no contiguous memory for the NPU's buffers`
+      instead; the driver stays loaded, and the memory is there after the
+      next boot (the launch job) - skip to that
 - [ ] `ls /dev/npu/amdxdna` shows `0`; no other `amdxdna` line (nothing
-      about firmware, memory or power)
+      about firmware or power)
 - [ ] `neural devices` lists `amdxdna/0` with `path` and `driver` only, and
       still no further `amdxdna` line in the syslog
 
+Replacing the driver later is the same `mv` with the node closed (syslog:
+`devfs: reload driver`, `uninit_driver`, and the lines above again: the
+memory is given back and taken anew, which on a machine that has been up
+for long can fail).
+
 ## 4. First start: `xdna_test info`
 
-Run as root (the default user is). This opens the node: buffer memory,
-firmware, power.
+Run as root (the default user is). This opens the node: firmware, power
+(and the buffer memory, if there was none at load).
 
 - [ ] syslog, in this order:
       `starting the NPU: marker made` ·
-      `buffer memory: 128 MiB at 0x…` ·
       `starting <PCI name> (1022:17f0 rev 20)` ·
       `Load firmware amdnpu/17f0_10/npu_7.sbin` ·
       `msix configured for … vectors` (the PCI bus manager) ·
@@ -101,26 +118,34 @@ back as configured` · `… MSI-X settings were lost`.
 - [ ] `xdna_test buffers` → `PASS`
 - [ ] `xdna_test run designs/passthrough_kernel` → `ok: design loaded`,
       `command … completed in … us`, `4096 bytes as expected`, `PASS`
+      (seen: 156 ms for the first command of a context, 112.5 ms for every
+      further one, whatever the design - not understood yet; `-p 4`, turbo,
+      tells whether the NPU's power mode is in it)
 - [ ] `xdna_test -o conv.out run designs/conv2d` → `PASS`; if bytes differ:
       `reference.py check designs/conv2d conv.out` on the host says whether
       they are the exact halves the rounding mode decides
 - [ ] `xdna_test run bundles/<key>` (the bundle's data, even weights) → `PASS`
 - [ ] if a command is not answered, try `xdna_test -b run …` (the size of
       the instructions in bytes) and note which one works
-- [ ] after each run the syslog says `NPU powered down`; the second run of
-      anything says `NPU powered up` first (the resume path)
+- [ ] after each run the syslog says `powering the NPU down`, `NPU powered
+      down`; the second run of anything says `powering the NPU up`, `NPU
+      powered up` first (the resume path)
+- [ ] the same many times: `xdna_test -n 200 run designs/conv2d`, and twenty
+      times `xdna_test run designs/passthrough_kernel`
 
 ## 6. The Neural Kit
 
 - [ ] `neural devices` → `amdxdna/0 NPU AMD AMD XDNA NPU (quantized)`;
-      syslog: nothing new
+      syslog: nothing new (with a session open elsewhere it also shows the
+      firmware version and the array)
 - [ ] `./amdxdna_backend_test -v --cycles 20 bundles/<key>` → ends with
       `(b) the NPU computed: PASS` and says how the NPU rounds halves.
       `(a) …` here means no program could be made: the syslog says why
       (`amdxdna.neural: …`)
 - [ ] `NEURAL_AMDXDNA_BUNDLES=$PWD/bundles neural compare bundles/<key>/model.tflite -d amdxdna/0`
       → `amdxdna/0 runs 1 of 1 operators`, `0 of 65536 differ` (or only
-      the halves, by one)
+      the halves, by one); exit status 4 and `FAILED … the CPU did its
+      part` mean a command failed
 - [ ] `xdna_test buffers` afterwards → `PASS` with as much room as in step 5
 - [ ] to keep the bundle: `cp -r bundles/<key> $NP/data/neural/amdxdna/`
 
@@ -129,8 +154,21 @@ back as configured` · `… MSI-X settings were lost`.
 - lid close and open with nothing using the NPU (it must not matter);
   then with `xdna_test -n 2000 run …` running (`NPU powered down` before
   the sleep, `NPU powered up` after, the runs go on)
-- a reboot: `/dev/npu` must be there, and nothing of `amdxdna` in the
-  syslog until something opens the node
+- a reboot: with the launch job the syslog has the driver's two lines
+  (`… starts it when opened`, `buffer memory: …`) from the boot on and
+  nothing else of `amdxdna` until something opens the node
+  (`launch_roster info x-vnd.airos-amdxdna-reserve` shows the job)
+
+## If the machine stops
+
+Do not repeat the step. Look at the screen first (a kernel debugger's text
+names the function). After the reboot, before anything opens the node: the
+end of `/boot/home/amdxdna.log` (it is synced line by line; the syslog may
+lack its last lines) says how far the driver was - `powering the NPU up`
+without `NPU powered up`: in the resume path; `NPU powered up` last: in a
+session (context, command) or right at its end; `powering the NPU down`
+last: in the suspend path. `debug 0x2` in the driver's settings before the
+next try adds the Linux driver's own debug lines to that log.
 
 ## The marker
 
@@ -146,7 +184,7 @@ log first; delete the file to allow another try.
 
 ```
 rm $NP/add-ons/kernel/drivers/bin/amdxdna $NP/add-ons/kernel/drivers/dev/npu/amdxdna
-rm -r $NP/data/firmware/amdnpu $NP/data/neural/amdxdna
+rm -r $NP/data/firmware/amdnpu $NP/data/neural/amdxdna $NP/data/launch/amdxdna
 rm $NP/add-ons/neural/amdxdna.neural       # and libneural.so, neural, if put there
 rm -f ~/config/settings/kernel/drivers/amdxdna ~/config/settings/kernel/drivers/amdxdna.starting
 ```

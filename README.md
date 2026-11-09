@@ -59,16 +59,27 @@ mode ("carveout", `amdxdna_cbuf.c`): all buffers are ranges of one piece of
 physical memory and the NPU is given physical addresses. Backporting that to
 6.18.52 would have meant rewriting its buffer code; the newer driver compiles
 against the 6.18.52 core with a handful of compat additions (`lx/accel.h`),
-and also brings the command wait ioctl (6.18 waits on a sync object only) and
-the newer command formats. Two changes to its files, both marked in them:
+and also brings the newer command formats. (Its command wait ioctl answers
+`EOPNOTSUPP` on these NPUs: a client waits for a command on the hardware
+context's sync object, `DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT` with the command's
+sequence number as the point, as `xdna_test.c` does.) Two changes to its files, both marked in them:
 `aie2_pci.c` starts without an IOMMU group, `aie_psp.c` takes the firmware
 buffer from physically contiguous pages (Haiku's kernel heap is not).
 
-**Memory and addresses.** When the NPU is first started, the driver takes a
-run of wired pages, 64 MiB aligned: 128 MiB unless `carveout_mb` in the
-settings says otherwise (smaller sizes are tried if no such run is free;
-it is found most easily soon after a boot), kept until the driver is
-unloaded. Every buffer object is a range of it: each client's device heap
+**Memory and addresses.** When the driver is loaded, it takes a run of wired
+pages and keeps it until it is unloaded: 128 MiB unless `carveout_mb` in the
+settings says otherwise. Such a run is only to be had while the machine is
+fresh (after some hours of use Haiku's page allocator finds none, at once),
+so the driver's package has launch_daemon look into `/dev/npu` at every boot
+(`data/launch/amdxdna`, from `haiku/amdxdna/launch`), which loads the driver
+and touches no hardware. The run is looked for 64 MiB aligned first, then
+anywhere (it will do if an aligned heap fits into it), then with 96 and 72
+MiB. If there is none, the driver stays loaded without and looks again
+whenever the NPU is started. `carveout_at_load 0` in the settings leaves the
+memory alone until the NPU is first started: nothing is held on a machine
+that never uses its NPU, and the NPU may then not be usable when it is
+wanted. (devfs loads the driver anew when its file is replaced: the run is
+given back and looked for again.) Every buffer object is a range of it: each client's device heap
 (64 MiB, aligned to its size: the designs' configuration and instructions),
 command buffers and data buffers. So 128 MiB serve one client with 64 MiB of
 data; every further client needs 64 MiB more for its heap.
@@ -88,9 +99,10 @@ start the NPU). Clients are not protected from each other either. Giving the
 node to unprivileged programs needs an IOMMU driver first.
 
 **Power.** Loading the driver touches no hardware: devfs loads it when
-`/dev/npu` is first looked into (or when the binary is installed), and it
-only finds the device in the PCI bus manager's list. The first open starts
-the Linux side, takes the buffer memory, loads the firmware
+`/dev/npu` is first looked into (the launch job, or when the binary is
+installed), and it only finds the device in the PCI bus manager's list and
+takes the buffer memory. The first open starts the Linux side, loads the
+firmware
 (`data/firmware/amdnpu/<device>_<revision>/npu_7.sbin`, else `npu.sbin`, in
 the usual firmware directories) and powers the NPU up; when the last client
 closes the node the driver's suspend path powers it down again (firmware
@@ -107,7 +119,8 @@ start after a boot, and while it exists the NPU is not started.
 **Firmware and packages.** `haiku/tools/package-amdxdna.sh [out dir
 [linux-firmware dir [LICENSE.amdnpu]]]` makes `amdnpu_firmwares` (the
 `amdnpu` files of linux-firmware, unchanged, with their licence) and
-`amdxdna` (the driver, linked from `dev/npu`). No firmware is kept here.
+`amdxdna` (the driver, linked from `dev/npu`, and the launch job that loads
+it at boot). No firmware is kept here.
 
 **Tests.** `haiku/tests/xdna_test.c` (C, no XRT): `info` prints the NPU's
 geometry and versions, `buffers` exercises buffer objects and mappings, `run
@@ -125,7 +138,8 @@ settings runs the driver's checks of the compat layer when it is loaded,
 `haiku_selftest 2` makes the node a device without hardware: buffers and
 mappings are real (`xdna_test buffers`), questions about the array get
 made-up answers, hardware contexts hold nothing and every command is
-refused, which is what the Neural Kit's back end is tried against in a
+refused (`fake_submit_error <errno>`: 19, the default, as by a device that
+is gone, 5 as a command that failed), which is what the Neural Kit's back end is tried against in a
 virtual machine (`ADDON=amdxdna haiku/tools/qemu-vm.sh selftest`).
 `haiku/tests/xdna/make-bundle.py` turns the conv2d design into a design
 bundle for that back end (`amdxdna.neural` in the Haiku tree) and says where

@@ -15,6 +15,11 @@ extern "C" {
 
 int lx_glue_set_param(const char *name, const char *value);
 
+/* when the driver is loaded and unloaded: the memory for the NPU's buffers
+   (unless the settings leave that to the first start) */
+int lx_glue_reserve(void);
+void lx_glue_unreserve(void);
+
 /* the Linux side without a device: nothing here touches the hardware */
 int lx_glue_init(void);
 void lx_glue_uninit(void);

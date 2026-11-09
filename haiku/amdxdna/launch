@@ -1,0 +1,15 @@
+# Installed as data/launch/amdxdna (launch_daemon reads it at boot; a copy
+# in ~/config/non-packaged/data/launch is read when the user's session
+# starts).
+#
+# Looking into /dev/npu makes devfs load the amdxdna driver, and the driver
+# takes the memory for the NPU's buffers when it is loaded: a run of 128 MiB
+# that is only to be had while the machine is fresh. Nothing touches the NPU:
+# that waits for a program to open /dev/npu/amdxdna/0. On a machine without
+# an AMD NPU the driver does not stay loaded and takes nothing.
+# "carveout_at_load 0" in the driver's settings leaves the memory alone.
+
+job x-vnd.airos-amdxdna-reserve {
+	launch /bin/ls /dev/npu/amdxdna
+	no_safemode
+}

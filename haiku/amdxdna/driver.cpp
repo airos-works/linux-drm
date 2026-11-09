@@ -9,12 +9,15 @@
 	buffer objects are mapped into teams by DRM_HAIKU_IOCTL_MAP, as for
 	haiku/amdgpu.
 
-	Nothing here touches the NPU until a client opens the node: loading the
-	driver (devfs does that when /dev/npu is first looked into) only finds
-	the PCI device in the bus manager's list. The first open starts the
-	Linux side, reserves the buffer memory, loads the firmware and powers the
-	NPU up; when the last client closes the node, the NPU is powered down
-	again, and the next open powers it up.
+	Nothing here touches the NPU until a client opens the node. Loading the
+	driver (devfs does that when /dev/npu is first looked into, which a
+	launch job of the package does early in the boot) finds the PCI device
+	in the bus manager's list and takes the memory the NPU's buffers will
+	be made of: a long run of pages, which is only there to be had while
+	the machine is fresh (glue.c). The first open starts the Linux side,
+	loads the firmware and powers the NPU up; when the last client closes
+	the node, the NPU is powered down again, and the next open powers it
+	up.
 
 	The NPU reads and writes physical memory at the addresses its clients
 	put into their commands (there is no IOMMU driver to confine it, see
@@ -23,7 +26,10 @@
 
 	Settings (~/config/settings/kernel/drivers/amdxdna): one parameter per
 	line, "name value": amdxdna's and drm's module parameters, and
-	"carveout_mb <MiB>" (the buffer memory, 128), "log_file <path>" (a
+	"carveout_mb <MiB>" (the buffer memory, 128), "carveout_at_load 0" (take
+	it at the first start of the NPU instead of when the driver is loaded:
+	nothing is held on a machine that never uses the NPU, at the risk of
+	finding none later), "log_file <path>" (a
 	synced copy of the driver's messages, see compat/src/vsprintf.c),
 	"haiku_selftest 1|2" (without an NPU: test the compat layer, or offer a
 	device without hardware). */
@@ -807,7 +813,6 @@ static status_t
 start_device()
 {
 	if (!sLinuxUp) {
-		apply_settings();
 		int error = lx_glue_init();
 		if (error != 0) {
 			TRACE("starting the Linux side failed: %d\n", error);
@@ -1111,6 +1116,7 @@ init_driver(void)
 			lx_glue_uninit();
 		} else
 			TRACE("self test: starting the Linux side failed: %d\n", error);
+		lx_glue_unreserve();
 		TRACE("self test: stopped\n");
 		return B_ERROR;
 	}
@@ -1129,6 +1135,12 @@ init_driver(void)
 			" starts it when opened\n", sInfo.vendor_id, sInfo.device_id,
 			sInfo.revision, sInfo.bus, sInfo.device, sInfo.function);
 	}
+
+	// The settings, and with them the memory for the NPU's buffers, now:
+	// later there may be no such run of pages. Without it the driver is
+	// still there, and looks again when the NPU is started.
+	apply_settings();
+	lx_glue_reserve();
 	return B_OK;
 }
 
@@ -1154,6 +1166,7 @@ uninit_driver(void)
 		lx_glue_uninit();
 		sLinuxUp = false;
 	}
+	lx_glue_unreserve();
 	locker.Unlock();
 	free(sDeviceNames[0]);
 	sDeviceNames[0] = NULL;

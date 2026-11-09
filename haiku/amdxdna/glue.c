@@ -13,9 +13,13 @@
 	space (PASID) as on Linux. amdxdna has a second mode, made for bringing
 	up platforms: every buffer is taken from one range of physical memory,
 	the "carveout", and the NPU is given physical addresses. Linux sets the
-	range aside at boot; here it is a run of wired pages allocated when the
-	NPU is started for the first time, 64 MiB aligned, as the device heap
-	(64 MiB, aligned to its size) has to be. */
+	range aside at boot; here it is a run of wired pages with room for the
+	device heap (64 MiB, aligned to its size). Haiku moves no pages to make
+	such a run: on a machine that has been up for a while there is none to
+	be had (the Framework 13 had 7 GB free and no 72 MiB in a row). So it is
+	taken when the driver is loaded, which the package arranges to happen
+	early in the boot (data/launch/amdxdna looks into /dev/npu), and kept
+	for as long as the driver is loaded. */
 
 #include <lx/haiku.h>
 #include <lx/vma.h>
@@ -66,7 +70,9 @@ extern const struct lx_param __stop_lx_params[];
 /* the NPU, once it was started, and its buffer memory */
 static struct pci_dev *npu;
 static struct amdxdna_dev *xdna_device;
-static bool device_released;
+/* no DRM device refers to the buffer memory (none was made yet, or the
+ * last reference to it is gone) */
+static bool device_released = true;
 static void *carveout_run;
 static unsigned long carveout_pages;
 static u64 carveout_address;
@@ -77,14 +83,27 @@ static bool fake_started;
 
 /* #pragma mark - parameters */
 
-/*	The memory for the NPU's buffers, in MiB. It holds the device heap (64
-	MiB: the instructions and configuration data of the designs loaded) and
-	the command and data buffers of all clients; 128 MiB leave 64 MiB for
-	those. Taken when the NPU is first started and kept until the driver is
-	unloaded: a run this long is found most easily soon after a boot. If
-	there is none, smaller ones are tried. */
+/*	The memory for the NPU's buffers, in MiB. It holds the device heap of
+	every client (64 MiB each: the instructions and configuration data of
+	the designs loaded) and all command and data buffers; 128 MiB leave 64
+	MiB for those with one client. If there is no such run, smaller ones are
+	tried. */
 static unsigned int haiku_carveout_mb = 128;
 module_param_named(carveout_mb, haiku_carveout_mb, uint, 0444);
+
+/*	Whether the memory is taken when the driver is loaded (1, the default)
+	or only when the NPU is first started (0: nothing is held on a machine
+	that never uses its NPU, and the NPU may not be usable when it is
+	wanted). Either way it is tried again at every start until there is
+	one. */
+static bool haiku_carveout_at_load = true;
+module_param_named(carveout_at_load, haiku_carveout_at_load, bool, 0444);
+
+/*	The device without hardware (haiku_selftest 2) refuses every command
+	with this error: ENODEV (19) as a device that is gone, EIO (5) as one
+	whose command failed, for testing what a client makes of either. */
+static unsigned int haiku_fake_submit_error = ENODEV;
+module_param_named(fake_submit_error, haiku_fake_submit_error, uint, 0444);
 
 /* the device heap of amdxdna's AIE2 devices: aie2_pci.h's AIE2_DEVM_SIZE */
 #define HEAP_BYTES			((u64)SZ_64M)
@@ -167,7 +186,7 @@ err_workqueues:
 	lx_rcu_exit();
 	lx_timer_exit();
 	lx_haiku_set_task_exit_hook(NULL);
-	lx_haiku_log_file(NULL);
+	/* the log file stays open: lx_glue_unreserve() */
 	return error;
 }
 
@@ -182,20 +201,30 @@ lx_glue_uninit(void)
 	lx_rcu_exit();
 	lx_timer_exit();
 	pr_info("amdxdna: stopped\n");
-	/* no code of this image may run after it is unloaded */
+	/* no code of this image may run after it is unloaded; the log file is
+	 * closed there too, in lx_glue_unreserve() */
 	lx_haiku_set_task_exit_hook(NULL);
-	lx_haiku_log_file(NULL);
 }
 
 
 /* #pragma mark - the buffer memory */
 
 
+/* a run is of use if a device heap fits into it, aligned, and 4 MiB more */
+static bool
+carveout_usable(u64 address, u64 size)
+{
+	u64 heap = ALIGN(address, HEAP_BYTES);
+	return heap + HEAP_BYTES <= address + size
+		&& size >= CARVEOUT_MIN_BYTES;
+}
+
+
 static int
 carveout_allocate(void)
 {
 	u64 sizes[4];
-	int count = 0, i;
+	int count = 0, i, aligned;
 
 	if (carveout_run != NULL)
 		return 0;
@@ -206,27 +235,46 @@ carveout_allocate(void)
 	if (sizes[0] > HEAP_BYTES + (u64)SZ_8M)
 		sizes[count++] = HEAP_BYTES + (u64)SZ_8M;
 	for (i = 0; i < count; i++) {
-		unsigned long long physical;
-		ktime_t start = ktime_get();
-		void *run = lx_haiku_page_run_alloc(sizes[i] >> PAGE_SHIFT,
-			HEAP_BYTES, &physical);
-		if (run == NULL) {
-			pr_warn("amdxdna: no %llu MiB of contiguous memory free (looked "
-				"for %lld ms)\n", sizes[i] >> 20,
+		/* With the heap's alignment the run can only begin at one place in
+		 * 64 MiB; a run from anywhere will do as well if a heap happens
+		 * to fit into it aligned (one of twice the heap's size always
+		 * does), with the other buffers on both sides of it. */
+		for (aligned = 1; aligned >= 0; aligned--) {
+			unsigned long long physical = 0;
+			ktime_t start = ktime_get();
+			void *run = lx_haiku_page_run_alloc(sizes[i] >> PAGE_SHIFT,
+				aligned ? HEAP_BYTES : 0, &physical);
+			if (run != NULL && !carveout_usable(physical, sizes[i])) {
+				lx_haiku_page_run_free(run, sizes[i] >> PAGE_SHIFT);
+				run = NULL;
+			}
+			if (run == NULL)
+				continue;
+			carveout_run = run;
+			carveout_pages = sizes[i] >> PAGE_SHIFT;
+			carveout_address = physical;
+			pr_info("amdxdna: buffer memory: %llu MiB at %#llx (found in "
+				"%lld ms)\n", sizes[i] >> 20, physical,
 				ktime_ms_delta(ktime_get(), start));
-			continue;
+			return 0;
 		}
-		carveout_run = run;
-		carveout_pages = sizes[i] >> PAGE_SHIFT;
-		carveout_address = physical;
-		pr_info("amdxdna: buffer memory: %llu MiB at %#llx (found in %lld "
-			"ms)\n", sizes[i] >> 20, physical,
-			ktime_ms_delta(ktime_get(), start));
-		return 0;
+		pr_warn("amdxdna: no %llu MiB of contiguous memory free\n",
+			sizes[i] >> 20);
 	}
-	pr_err("amdxdna: no contiguous memory for the NPU's buffers; it is found "
-		"most easily soon after a boot\n");
+	pr_err("amdxdna: no contiguous memory for the NPU's buffers; it is there "
+		"soon after a boot\n");
 	return -ENOMEM;
+}
+
+
+/*	When the driver is loaded: the buffer memory, while there is some.
+	Nothing of the Linux side is running, and nothing touches the NPU. */
+int
+lx_glue_reserve(void)
+{
+	if (!haiku_carveout_at_load)
+		return 0;
+	return carveout_allocate();
 }
 
 
@@ -314,9 +362,9 @@ lx_glue_start(int bus, int device, int function)
 		pci_free_irq_vectors(pdev);
 		pci_clear_master(pdev);
 		pdev->driver = NULL;
-		/* the device was never registered, or is unplugged again */
+		/* the device was never registered, or is unplugged again; the
+		 * buffer memory stays for the next try */
 		device_released = true;
-		carveout_free();
 		return error;
 	}
 	npu = pdev;
@@ -341,6 +389,9 @@ lx_glue_suspend(void)
 
 	if (npu == NULL)
 		return 0;
+	/* (a line before each step: the synced log then tells where a machine
+	 * that stopped had got to) */
+	pr_info("amdxdna: powering the NPU down\n");
 	error = amdxdna_pm_suspend(&npu->dev);
 	if (error != 0) {
 		pr_err("amdxdna: powering the NPU down failed: %d\n", error);
@@ -359,6 +410,7 @@ lx_glue_resume(void)
 
 	if (npu == NULL)
 		return 0;
+	pr_info("amdxdna: powering the NPU up\n");
 	error = amdxdna_pm_resume(&npu->dev);
 	if (error != 0) {
 		pr_err("amdxdna: powering the NPU up failed: %d\n", error);
@@ -388,8 +440,17 @@ lx_glue_stop(void)
 	npu->driver = NULL;
 	npu = NULL;
 	xdna_device = NULL;
-	carveout_free();
 	pr_info("amdxdna: removed\n");
+}
+
+
+/*	When the driver is unloaded, after lx_glue_stop() and lx_glue_uninit():
+	the buffer memory goes back, and the log file is closed. */
+void
+lx_glue_unreserve(void)
+{
+	carveout_free();
+	lx_haiku_log_file(NULL);
 }
 
 
@@ -877,7 +938,7 @@ static int
 fake_cmd_submit(struct amdxdna_hwctx *hwctx, struct amdxdna_sched_job *job,
 	u64 *seq)
 {
-	return -ENODEV;
+	return -(int)haiku_fake_submit_error;
 }
 
 
@@ -963,7 +1024,6 @@ lx_glue_fake_start(void)
 err:
 	devres_release_all(&fake_parent);
 	device_released = true;
-	carveout_free();
 	return error;
 }
 
@@ -979,6 +1039,5 @@ fake_stop(void)
 	xdna_device = NULL;
 	drm_dev_unplug(&xdna->ddev);
 	devres_release_all(&fake_parent);
-	carveout_free();
 	pr_info("amdxdna selftest: device without hardware removed\n");
 }

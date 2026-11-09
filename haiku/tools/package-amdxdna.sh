@@ -7,8 +7,9 @@
 #       under the names the driver asks for (npu_7.sbin, then npu.sbin;
 #       linux-firmware has them as links to versioned files)
 #   amdxdna-<version>-1-x86_64.hpkg        the driver (out-xdna/amdxdna) as
-#       bin/amdxdna, linked from dev/npu; requires the firmware and the
-#       haiku package it was built against
+#       bin/amdxdna, linked from dev/npu, and data/launch/amdxdna, the
+#       job that has it loaded at boot; requires the firmware and the haiku
+#       package it was built against
 #
 #   haiku/tools/package-amdxdna.sh [OUTPUT_DIR [LINUX_FIRMWARE_DIR [LICENSE]]]
 #
@@ -143,6 +144,10 @@ chmod 755 "$drv/add-ons/kernel/drivers/bin/amdxdna"
 # the dev/npu directory makes devfs offer /dev/npu; the driver is loaded
 # when that is first looked into, and starts the NPU when its node is opened
 ln -s ../../bin/amdxdna "$drv/add-ons/kernel/drivers/dev/npu/amdxdna"
+# which a job does early in the boot: the driver takes its buffer memory
+# when it is loaded, while there is a run of pages long enough
+mkdir -p "$drv/data/launch"
+cp "$ROOT/haiku/amdxdna/launch" "$drv/data/launch/amdxdna"
 cat > "$drv/documentation/packages/amdxdna/README" <<EOF
 amdxdna $driverVersion (linux-drm $commit): Linux's amdxdna driver for the
 NPU of AMD Ryzen AI processors, with the DRM core, running on Haiku through
@@ -160,8 +165,12 @@ any memory.
 
 Settings: one "name value" line each in
 ~/config/settings/kernel/drivers/amdxdna; "carveout_mb <MiB>" is the memory
-for the NPU's buffers (128). A start of the NPU that stops the machine is
-not repeated: ~/config/settings/kernel/drivers/amdxdna.starting exists
+for the NPU's buffers (128), which the driver takes when it is loaded: a
+launch job (data/launch/amdxdna) has that happen early in the boot, while
+such a run of pages is free. "carveout_at_load 0" leaves the memory alone
+until the NPU is first started, when there may be none. A start of the NPU
+that stops the machine is not repeated:
+~/config/settings/kernel/drivers/amdxdna.starting exists
 while the NPU is started for the first time after a boot, and while it
 exists the NPU is not started.
 EOF
