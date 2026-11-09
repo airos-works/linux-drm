@@ -101,6 +101,13 @@ LXFLAGS := -std=gnu11 -nostdinc -fshort-wchar -funsigned-char $(KFLAGS) \
 	-I$(COMPAT)/include -I$(LINUX)/include -I$(LINUX)/include/uapi \
 	-isystem $(dir $(shell $(CC) -print-libgcc-file-name))include
 
+# Debug builds, best into their own OUT: make ... KMALLOC_DEBUG=1 checks
+# every kfree() (twice, of something else, written past its end) and keeps
+# freed memory for a while to see whether it is written to (compat/src/mm.c)
+ifneq ($(KMALLOC_DEBUG),)
+LXFLAGS += -DLX_KMALLOC_DEBUG
+endif
+
 ifeq ($(KIND),amdxdna)
 # the glue sees the driver's own headers
 AMD_INCLUDES := -I$(LINUX)/drivers/accel/amdxdna

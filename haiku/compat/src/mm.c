@@ -23,9 +23,102 @@ struct kmalloc_header {
 	void *base;
 	size_t size;
 	void *site;			/* who allocated it, for lx_kmalloc_top() */
+#ifdef LX_KMALLOC_DEBUG
+	unsigned long magic;
+#endif
 };
 
 #define KMALLOC_MAGIC_SIZE	sizeof(struct kmalloc_header)
+
+#ifdef LX_KMALLOC_DEBUG
+/*	A debugging build (KMALLOC_DEBUG=1): each block has bytes after its end
+	that must still be there when it is freed, a mark that tells a second
+	kfree() and a kfree() of something else, and after kfree() it is filled
+	and kept for a while - until 16 MiB or 16384 newer blocks have been
+	freed - to see whether anything still writes to it. Any of these
+	panics, naming the block's allocation site (an offset as
+	haiku/tools/symbolize-trace.sh takes them). */
+#define KMALLOC_REDZONE		16
+#define KMALLOC_ALIVE		0x6c786b6d616c6c6fUL
+#define KMALLOC_FREED		0x6c786b6672656564UL
+#define KMALLOC_KEPT		16384
+#define KMALLOC_KEPT_BYTES	(16L << 20)
+
+static struct kmalloc_header *kmalloc_kept[KMALLOC_KEPT];
+static unsigned int kmalloc_kept_head, kmalloc_kept_count;
+static long kmalloc_kept_bytes;
+static DEFINE_SPINLOCK(kmalloc_kept_lock);
+
+
+static void
+kmalloc_debug_panic(const struct kmalloc_header *header, const char *what)
+{
+	static char text[160];
+	snprintf(text, sizeof(text), "linux compat: %s (object %p, %zu bytes, "
+		"allocated at offset %lx)", what, header + 1, header->size,
+		(unsigned long)header->site
+			- (unsigned long)&__cyg_profile_func_enter);
+	lx_haiku_panic(text);
+}
+
+
+static void
+kmalloc_debug_release(struct kmalloc_header *header)
+{
+	const unsigned char *bytes = (const unsigned char *)(header + 1);
+	size_t i;
+	for (i = 0; i < header->size + KMALLOC_REDZONE; i++) {
+		if (bytes[i] != 0x6b)
+			kmalloc_debug_panic(header, "memory written to after kfree()");
+	}
+	if (header->magic != KMALLOC_FREED)
+		kmalloc_debug_panic(header, "header overwritten after kfree()");
+	lx_haiku_free(header->base);
+}
+
+
+static void
+kmalloc_debug_free(struct kmalloc_header *header)
+{
+	const unsigned char *bytes = (const unsigned char *)(header + 1);
+	struct kmalloc_header *old[8];
+	int count = 0, i;
+
+	if (header->magic == KMALLOC_FREED)
+		kmalloc_debug_panic(header, "kfree() of freed memory");
+	if (header->magic != KMALLOC_ALIVE) {
+		lx_haiku_panic("linux compat: kfree() of what kmalloc() did not "
+			"return, or its header was overwritten");
+	}
+	for (i = 0; i < KMALLOC_REDZONE; i++) {
+		if (bytes[header->size + i] != 0xa5)
+			kmalloc_debug_panic(header, "memory written past its end");
+	}
+	header->magic = KMALLOC_FREED;
+	memset(header + 1, 0x6b, header->size + KMALLOC_REDZONE);
+
+	spin_lock(&kmalloc_kept_lock);
+	/* room first (always for this one; the rest a few at a time) */
+	while (kmalloc_kept_count > 0 && count < 8
+		&& (kmalloc_kept_count == KMALLOC_KEPT
+			|| kmalloc_kept_bytes > KMALLOC_KEPT_BYTES)) {
+		old[count] = kmalloc_kept[kmalloc_kept_head];
+		kmalloc_kept_head = (kmalloc_kept_head + 1) % KMALLOC_KEPT;
+		kmalloc_kept_count--;
+		kmalloc_kept_bytes -= old[count]->size;
+		count++;
+	}
+	kmalloc_kept[(kmalloc_kept_head + kmalloc_kept_count) % KMALLOC_KEPT]
+		= header;
+	kmalloc_kept_count++;
+	kmalloc_kept_bytes += header->size;
+	spin_unlock(&kmalloc_kept_lock);
+	for (i = 0; i < count; i++)
+		kmalloc_debug_release(old[i]);
+}
+#else
+#define KMALLOC_REDZONE		0
+#endif
 
 
 static size_t
@@ -210,7 +303,7 @@ lx_kmalloc_site(size_t size, gfp_t flags, void *site)
 	if (size == 0)
 		return ZERO_SIZE_PTR;
 	align = kmalloc_alignment(size);
-	base = lx_haiku_malloc(size + align + KMALLOC_MAGIC_SIZE);
+	base = lx_haiku_malloc(size + align + KMALLOC_MAGIC_SIZE + KMALLOC_REDZONE);
 	if (base == NULL) {
 		if (!(flags & __GFP_NOWARN))
 			pr_warn("linux compat: kmalloc(%zu) failed\n", size);
@@ -221,6 +314,10 @@ lx_kmalloc_site(size_t size, gfp_t flags, void *site)
 	header->base = base;
 	header->size = size;
 	header->site = site;
+#ifdef LX_KMALLOC_DEBUG
+	header->magic = KMALLOC_ALIVE;
+	memset(object + size, 0xa5, KMALLOC_REDZONE);
+#endif
 	slot = lx_site_slot(site);
 	__atomic_add_fetch(&lx_sites[slot].live, 1, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&lx_sites[slot].bytes, (long)size, __ATOMIC_RELAXED);
@@ -250,7 +347,11 @@ lx_kfree(const void *object)
 	}
 	__atomic_sub_fetch(&lx_kmalloc_live, 1, __ATOMIC_RELAXED);
 	__atomic_sub_fetch(&lx_kmalloc_bytes, (long)header->size, __ATOMIC_RELAXED);
+#ifdef LX_KMALLOC_DEBUG
+	kmalloc_debug_free(header);
+#else
 	lx_haiku_free(header->base);
+#endif
 }
 
 
