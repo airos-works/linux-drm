@@ -16,7 +16,7 @@
 		behind the node: also runs on the device without hardware of a
 		virtual machine (driver settings: "haiku_selftest 2").
 	xdna_test [-d <device>] [-t <ms>] [-n <runs>] [-o <file>] [-b]
-			run <design dir>
+			[-p <mode>] run <design dir>
 		loads a design and runs it: <design dir>/manifest.txt names the
 		configuration (a raw PDI, as mlir-aie's aiecc writes it), the
 		instruction sequence and the buffers with their contents, the
@@ -24,7 +24,9 @@
 		such directories). -o keeps the first output buffer of the first
 		run (for "reference.py check"). -b passes the size of the
 		instruction sequence in bytes, as mlir-aie's Python host code does;
-		the default is in words, as its C++ tests do.
+		the default is in words, as its C++ tests do. -p sets the NPU's
+		power mode first (enum amdxdna_power_mode_type: 0 default, 1 low,
+		2 medium, 3 high, 4 turbo; it stays until the NPU is powered down).
 
 	"buffers" counts the free buffer memory before and after: run it alone.
 
@@ -497,6 +499,36 @@ test_buffers(void)
 /* #pragma mark - running a design */
 
 
+/*	Waits for a command. The NPUs of today's processors (the driver's
+	"AIE2" devices) signal a command's end on the hardware context's sync
+	object, at the point of the command's sequence number: Linux's
+	DRM_IOCTL_AMDXDNA_WAIT_CMD is for newer devices only and answers
+	EOPNOTSUPP here. The timeout of a sync object wait is a point in time
+	of the monotonic clock, which is system_time() on Haiku. */
+static int
+wait_command(uint32_t context, uint32_t syncObject, uint64_t sequence,
+	unsigned timeout)
+{
+	struct amdxdna_drm_wait_cmd wait = {
+		.hwctx = context,
+		.timeout = timeout,
+		.seq = sequence,
+	};
+	struct drm_syncobj_timeline_wait timeline = {};
+	uint64_t point = sequence;
+
+	if (syncObject == 0)
+		return ioctl(sFd, DRM_IOCTL_AMDXDNA_WAIT_CMD, &wait);
+
+	timeline.handles = (uintptr_t)&syncObject;
+	timeline.points = (uintptr_t)&point;
+	timeline.timeout_nsec = (system_time() + (bigtime_t)timeout * 1000) * 1000;
+	timeline.count_handles = 1;
+	timeline.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
+	return ioctl(sFd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &timeline);
+}
+
+
 #define MAX_BUFFERS		5
 	/* mlir-aie's kernels take up to five buffers */
 
@@ -686,9 +718,11 @@ run_design(const char *directory, unsigned timeout, int runs,
 	context.qos_p = (uintptr_t)&qos;
 	context.max_opc = design.ops_per_cycle;
 	context.num_tiles = design.columns * metadata.core.row_count;
+	bigtime_t before = system_time();
 	if (ioctl(sFd, DRM_IOCTL_AMDXDNA_CREATE_HWCTX, &context) != 0)
 		die("creating the hardware context: %s", strerror(errno));
-	printf("hardware context %u\n", context.handle);
+	printf("hardware context %u, sync object %u (%lld us)\n", context.handle,
+		context.syncobj_handle, (long long)(system_time() - before));
 
 	/* the configuration becomes its one compute unit */
 	units.header.num_cus = 1;
@@ -698,9 +732,11 @@ run_design(const char *directory, unsigned timeout, int runs,
 	config.param_type = DRM_AMDXDNA_HWCTX_CONFIG_CU;
 	config.param_val = (uintptr_t)&units;
 	config.param_val_size = sizeof(units);
+	before = system_time();
 	if (ioctl(sFd, DRM_IOCTL_AMDXDNA_CONFIG_HWCTX, &config) != 0)
 		die("configuring the compute unit: %s", strerror(errno));
-	printf("ok: design loaded\n");
+	printf("ok: design loaded (%lld us)\n",
+		(long long)(system_time() - before));
 
 	/* the data buffers */
 	for (i = 0; i < design.buffer_count; i++) {
@@ -720,8 +756,7 @@ run_design(const char *directory, unsigned timeout, int runs,
 
 	for (run = 0; run < runs; run++) {
 		struct amdxdna_drm_exec_cmd exec = {};
-		struct amdxdna_drm_wait_cmd wait = {};
-		bigtime_t start, end;
+		bigtime_t start, submitted, end;
 		int count = 0, bad = 0;
 
 		for (i = 0; i < design.buffer_count; i++) {
@@ -768,10 +803,9 @@ run_design(const char *directory, unsigned timeout, int runs,
 		start = system_time();
 		if (ioctl(sFd, DRM_IOCTL_AMDXDNA_EXEC_CMD, &exec) != 0)
 			die("submitting the command: %s", strerror(errno));
-		wait.hwctx = context.handle;
-		wait.timeout = timeout;
-		wait.seq = exec.seq;
-		if (ioctl(sFd, DRM_IOCTL_AMDXDNA_WAIT_CMD, &wait) != 0) {
+		submitted = system_time();
+		if (wait_command(context.handle, context.syncobj_handle, exec.seq,
+				timeout) != 0) {
 			fail("waiting for command %llu: %s (state: %s)",
 				(unsigned long long)exec.seq, strerror(errno),
 				kCmdStates[CMD_STATE(command[0]) % 10]);
@@ -786,8 +820,9 @@ run_design(const char *directory, unsigned timeout, int runs,
 				command[1], command[2], command[3]);
 			break;
 		}
-		printf("run %d: command %llu completed in %lld us\n", run,
-			(unsigned long long)exec.seq, (long long)(end - start));
+		printf("run %d: command %llu completed in %lld us (%lld to submit)\n",
+			run, (unsigned long long)exec.seq, (long long)(end - start),
+			(long long)(submitted - start));
 
 		for (i = 0; i < design.buffer_count; i++) {
 			struct design_buffer *buffer = &design.buffers[i];
@@ -824,22 +859,25 @@ main(int argc, char **argv)
 	unsigned timeout = 10000;
 	int runs = 1;
 	int sizeInBytes = 0;
+	int powerMode = -1;
 	int option;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	while ((option = getopt(argc, argv, "d:t:n:o:b")) != -1) {
+	while ((option = getopt(argc, argv, "d:t:n:o:bp:")) != -1) {
 		switch (option) {
 			case 'd': device = optarg; break;
 			case 't': timeout = strtoul(optarg, NULL, 0); break;
 			case 'n': runs = atoi(optarg); break;
 			case 'o': outputFile = optarg; break;
 			case 'b': sizeInBytes = 1; break;
+			case 'p': powerMode = atoi(optarg); break;
 			default: argc = 0; break;
 		}
 	}
 	if (optind >= argc) {
 		printf("usage: xdna_test [-d <device>] info | buffers | "
-			"[-t <ms>] [-n <runs>] [-o <file>] [-b] run <design dir>\n");
+			"[-t <ms>] [-n <runs>] [-o <file>] [-b] [-p <mode>] "
+			"run <design dir>\n");
 		return 2;
 	}
 
@@ -848,6 +886,19 @@ main(int argc, char **argv)
 	if (sFd < 0) {
 		printf("FAIL: %s: %s\n", device, strerror(errno));
 		return 1;
+	}
+
+	if (powerMode >= 0) {
+		struct amdxdna_drm_set_power_mode mode = {
+			.power_mode = (uint8_t)powerMode
+		};
+		struct amdxdna_drm_set_state state = {
+			.param = DRM_AMDXDNA_SET_POWER_MODE,
+			.buffer_size = sizeof(mode),
+			.buffer = (uintptr_t)&mode
+		};
+		if (ioctl(sFd, DRM_IOCTL_AMDXDNA_SET_STATE, &state) != 0)
+			fail("power mode %d: %s", powerMode, strerror(errno));
 	}
 
 	if (!strcmp(argv[optind], "info"))
