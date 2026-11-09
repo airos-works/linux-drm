@@ -551,10 +551,17 @@ vprintk(const char *fmt, va_list args)
 	}
 	char buffer[1024];
 	const char *text = buffer;
-	int length = vsnprintf(buffer, sizeof(buffer), fmt, args);
+	int length = vsnprintf(buffer, sizeof(buffer) - 1, fmt, args);
 	/* KERN_<level>: "\001" and a digit or 'c' */
 	while (text[0] == '\001' && text[1] != '\0')
 		text += 2;
+#ifdef LX_ADDON_AMDXDNA
+	/* amdxdna's messages do not end their lines: Linux's printk() ends a
+	 * line when the next message is not a continuation (KERN_CONT), which
+	 * this driver does not use */
+	if (*text != '\0' && text[strlen(text) - 1] != '\n')
+		strcat(buffer, "\n");
+#endif
 	if (*text != '\0')
 		lx_haiku_log(text);
 	if (printk_delay_us > 0)

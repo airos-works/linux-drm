@@ -613,10 +613,17 @@ pci_clear_master(struct pci_dev *dev)
 
 
 /*	MSI-X, for drivers that ask for nothing else (amdxdna: one vector per
-	mailbox channel). Haiku's PCI bus manager fills the table; what it wrote
-	is kept, so that lx_pci_msix_restore() can write it again after the
-	device lost power: Linux's PCI core does that on every resume, Haiku has
-	no call for it. */
+	mailbox channel).
+
+	Linux writes an interrupt's message into the device's MSI-X table when
+	the interrupt is requested, and again after every sleep. Haiku's PCI bus
+	manager writes the whole table once, when the vectors are configured.
+	For a device whose table cannot be relied on while it is powered down
+	(the NPU is powered up by its driver, after the vectors were allocated),
+	the vectors are therefore configured when the driver first asks for one
+	of their numbers, which it does right before it requests the interrupt;
+	and whenever it asks again, the table is looked at and written again if
+	it no longer holds what Haiku put there. */
 
 int
 lx_pci_msix_vec_count(struct pci_dev *dev)
@@ -627,23 +634,35 @@ lx_pci_msix_vec_count(struct pci_dev *dev)
 }
 
 
-static int
-msix_enable(struct pci_dev *dev, unsigned int min_vecs, unsigned int max_vecs)
+/* an x86 MSI message for the vector after the previous entry's, unmasked */
+static bool
+msix_entry_plausible(const u32 *entry, const u32 *previous)
 {
-	int available = lx_pci_msix_vec_count(dev);
-	unsigned int count, i;
+	if ((entry[0] & 0xfff00000) != 0xfee00000 || entry[1] != 0
+		|| (entry[3] & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0)
+		return false;
+	return previous == NULL
+		|| (entry[0] == previous[0] && entry[2] == previous[2] + 1);
+}
+
+
+static int
+msix_configure(struct pci_dev *dev)
+{
+	unsigned int count = dev->lx_irq_count, i;
+	bool plausible = true;
 	int vector;
 	u32 table;
 
-	if (available <= 0 || dev->msix_cap == 0)
-		return -ENOSPC;
-	count = min_t(unsigned int, max_vecs, available);
-	if (count < min_vecs)
-		return -ENOSPC;
 	vector = lx_haiku_pci_enable_msix(lx_bus(dev), PCI_SLOT(dev->devfn),
 		PCI_FUNC(dev->devfn), count);
-	if (vector < 0)
+	if (vector < 0) {
+		pr_err("%s: MSI-X: Haiku configured no %u vectors\n", pci_name(dev),
+			count);
 		return -ENOSPC;
+	}
+	dev->irq = vector;
+	dev->msix_enabled = 1;
 
 	/* the table: in the BAR and at the offset the capability names */
 	pci_read_config_dword(dev, dev->msix_cap + PCI_MSIX_TABLE, &table);
@@ -651,15 +670,25 @@ msix_enable(struct pci_dev *dev, unsigned int min_vecs, unsigned int max_vecs)
 	dev->lx_msix_table = ioremap(pci_resource_start(dev,
 			table & PCI_MSIX_TABLE_BIR) + (table & PCI_MSIX_TABLE_OFFSET),
 		count * PCI_MSIX_ENTRY_SIZE);
-	if (dev->lx_msix_saved != NULL && dev->lx_msix_table != NULL) {
-		for (i = 0; i < count * 4; i++)
-			dev->lx_msix_saved[i] = readl(dev->lx_msix_table + i * 4);
+	if (dev->lx_msix_saved == NULL || dev->lx_msix_table == NULL)
+		return 0;
+	for (i = 0; i < count * 4; i++)
+		dev->lx_msix_saved[i] = readl(dev->lx_msix_table + i * 4);
+	for (i = 0; i < count && plausible; i++) {
+		plausible = msix_entry_plausible(&dev->lx_msix_saved[i * 4],
+			i > 0 ? &dev->lx_msix_saved[(i - 1) * 4] : NULL);
 	}
-
-	dev->irq = vector;
-	dev->msix_enabled = 1;
-	dev->lx_irq_count = count;
-	return count;
+	if (!plausible) {
+		/* never written back: a wrong message address would have the
+		 * device write its interrupts somewhere into memory */
+		pr_warn("%s: MSI-X table does not read back as configured (entry 0: "
+			"%#x %#x %#x %#x); it will not be restored\n", pci_name(dev),
+			dev->lx_msix_saved[0], dev->lx_msix_saved[1],
+			dev->lx_msix_saved[2], dev->lx_msix_saved[3]);
+		kfree(dev->lx_msix_saved);
+		dev->lx_msix_saved = NULL;
+	}
+	return 0;
 }
 
 
@@ -700,6 +729,10 @@ lx_pci_msix_restore(struct pci_dev *dev)
 			(control | PCI_MSIX_FLAGS_ENABLE) & ~PCI_MSIX_FLAGS_MASKALL);
 		written++;
 	}
+	if (written > 0) {
+		pr_warn("%s: %d MSI-X settings were lost (the device was without "
+			"power?); written again\n", pci_name(dev), written);
+	}
 	return written;
 }
 
@@ -708,8 +741,19 @@ int
 pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
 	unsigned int max_vecs, unsigned int flags)
 {
-	if ((flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX | PCI_IRQ_INTX)) == PCI_IRQ_MSIX)
-		return msix_enable(dev, min_vecs, max_vecs);
+	if ((flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX | PCI_IRQ_INTX)) == PCI_IRQ_MSIX) {
+		/* only counted here; see msix_configure() */
+		int available = lx_pci_msix_vec_count(dev);
+		unsigned int count;
+		if (available <= 0 || dev->msix_cap == 0)
+			return -ENOSPC;
+		count = min_t(unsigned int, max_vecs, available);
+		if (count < min_vecs)
+			return -ENOSPC;
+		dev->lx_irq_count = count;
+		dev->lx_msix_wanted = 1;
+		return count;
+	}
 	if (flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX)) {
 		int vector = lx_haiku_pci_enable_msi(lx_bus(dev),
 			PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn));
@@ -743,6 +787,7 @@ pci_free_irq_vectors(struct pci_dev *dev)
 	}
 	kfree(dev->lx_msix_saved);
 	dev->lx_msix_saved = NULL;
+	dev->lx_msix_wanted = 0;
 	dev->lx_irq_count = 0;
 }
 
@@ -752,8 +797,21 @@ pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 {
 	if (nr >= dev->lx_irq_count)
 		return -EINVAL;
-	/* MSI-X vectors follow one another */
-	return dev->irq + (dev->msix_enabled ? nr : 0);
+	if (dev->lx_msix_wanted) {
+		static DEFINE_MUTEX(lock);
+		int error = 0;
+		mutex_lock(&lock);
+		if (!dev->msix_enabled)
+			error = msix_configure(dev);
+		else if (dev->lx_msix_saved != NULL)
+			lx_pci_msix_restore(dev);
+		mutex_unlock(&lock);
+		if (error != 0)
+			return error;
+		/* MSI-X vectors follow one another */
+		return dev->irq + nr;
+	}
+	return dev->irq;
 }
 
 

@@ -68,9 +68,10 @@ unsigned long devm_get_free_pages(struct device *dev, gfp_t gfp,
 /* #pragma mark - MSI-X */
 
 /*	As many vectors as asked for (Haiku: 32 at most), their interrupts
-	numbered from pci_irq_vector(dev, 0) on. Used when a driver asks for
-	PCI_IRQ_MSIX only; lx_pci_msix_restore() writes the table again after
-	the device was without power (both are declared in lx/pci.h). */
+	numbered from pci_irq_vector(dev, 0) on, for a driver that asks for
+	PCI_IRQ_MSIX only. They are configured when the driver first asks for a
+	vector's number, and the table is checked whenever it asks again:
+	compat/src/pci.c says why. (Declared in lx/pci.h.) */
 
 
 /* #pragma mark - no IOMMU */

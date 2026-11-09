@@ -113,7 +113,9 @@ struct pci_dev {
 	struct pci_driver *driver;
 	void *lx_haiku;			/* Haiku's pci_info and module */
 	unsigned int lx_irq_count;
-	/* MSI-X: the table, and what its entries were set to */
+	/* MSI-X: asked for (configured at the first pci_irq_vector()); the
+	 * table, and what its entries were set to */
+	unsigned int lx_msix_wanted:1;
 	void __iomem *lx_msix_table;
 	u32 *lx_msix_saved;
 };

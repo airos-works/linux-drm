@@ -354,20 +354,11 @@ lx_glue_suspend(void)
 int
 lx_glue_resume(void)
 {
-	int error, rewritten;
+	int error;
 
 	if (npu == NULL)
 		return 0;
 	error = amdxdna_pm_resume(&npu->dev);
-	/* Linux's PCI core writes the MSI-X table again after every sleep;
-	 * here nothing put the function to sleep, so it should be as it was */
-	rewritten = lx_pci_msix_restore(npu);
-	if (rewritten > 0) {
-		pr_warn("amdxdna: %d MSI-X settings were lost while the NPU was "
-			"down; written again\n", rewritten);
-		if (error != 0)
-			error = amdxdna_pm_resume(&npu->dev);
-	}
 	if (error != 0) {
 		pr_err("amdxdna: powering the NPU up failed: %d\n", error);
 		pci_clear_master(npu);
