@@ -419,7 +419,9 @@ kthread_main(void *_task)
 	struct kthread *kthread = task->lx_kthread;
 	struct lx_task_private *priv = task->lx_private;
 
-	lx_haiku_task_register(priv->thread, task);
+	/* kthread_stop() frees the task, not the end of this thread: see
+	 * lx_haiku_task_register_owned() */
+	lx_haiku_task_register_owned(priv->thread, task);
 
 	/* Linux threads start stopped until wake_up_process() */
 	if (!test_bit(KTHREAD_SHOULD_STOP, &kthread->flags))

@@ -890,6 +890,9 @@ struct TaskNode {
 	TaskNode*	next;
 	thread_id	thread;
 	void*		task;
+	bool		owned;
+		// someone else frees the task (a kthread's: kthread_stop()); the
+		// thread's end leaves it alone
 };
 
 static const uint32 kTaskBuckets = 1024;
@@ -924,14 +927,15 @@ lx_haiku_task_lookup(lx_thread_id thread)
 }
 
 
-extern "C" int
-lx_haiku_task_register(lx_thread_id thread, void* task)
+static int
+task_register(lx_thread_id thread, void* task, bool owned)
 {
 	TaskNode* node = (TaskNode*)malloc(sizeof(TaskNode));
 	if (node == NULL)
 		return -kLinuxENOMEM;
 	node->thread = thread;
 	node->task = task;
+	node->owned = owned;
 
 	TaskNode* replaced = NULL;
 	cpu_status state = disable_interrupts();
@@ -950,6 +954,60 @@ lx_haiku_task_register(lx_thread_id thread, void* task)
 	restore_interrupts(state);
 	free(replaced);
 	return 0;
+}
+
+
+extern "C" int
+lx_haiku_task_register(lx_thread_id thread, void* task)
+{
+	return task_register(thread, task, false);
+}
+
+
+/*!	The task of a thread whose end is someone else's to deal with: when the
+	thread ends, the task exit hook is not called for it, and the task stays
+	registered until lx_haiku_task_unregister().
+
+	A kthread's task is freed by kthread_stop(), which waits for the thread
+	first - but wait_for_thread() returns at once, with an error, for a
+	thread of another team that is already out of the thread table and
+	still on its way out. Its end was then noticed after kthread_stop() had
+	freed the task: the hook looked into freed memory to see whose task it
+	was, took it for its own and freed it and its event a second time.
+*/
+extern "C" int
+lx_haiku_task_register_owned(lx_thread_id thread, void* task)
+{
+	return task_register(thread, task, true);
+}
+
+
+/*!	The thread has ended: its task, taken out of the table - unless the
+	task is someone else's to free.
+*/
+static void*
+task_take_ended(thread_id thread)
+{
+	TaskNode* removed = NULL;
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sTaskLock);
+	for (TaskNode** link = &sTaskBuckets[task_hash(thread)]; *link != NULL;
+			link = &(*link)->next) {
+		if ((*link)->thread == thread) {
+			if (!(*link)->owned) {
+				removed = *link;
+				*link = removed->next;
+			}
+			break;
+		}
+	}
+	release_spinlock(&sTaskLock);
+	restore_interrupts(state);
+	if (removed == NULL)
+		return NULL;
+	void* task = removed->task;
+	free(removed);
+	return task;
 }
 
 
@@ -1020,11 +1078,8 @@ public:
 			thread = threadStruct->id;
 		} else if (event->FindInt32("thread", &thread) != B_OK)
 			return;
-		void* task = lx_haiku_task_lookup(thread);
-		if (task == NULL)
-			return;
-		lx_haiku_task_unregister(thread);
-		if (sTaskExitHook != NULL)
+		void* task = task_take_ended(thread);
+		if (task != NULL && sTaskExitHook != NULL)
 			sTaskExitHook(task);
 	}
 };

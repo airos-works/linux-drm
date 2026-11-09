@@ -103,6 +103,9 @@ void lx_haiku_yield(void);
    task dies */
 void *lx_haiku_task_lookup(lx_thread_id thread);
 int lx_haiku_task_register(lx_thread_id thread, void *task);
+/* ... of a thread whose task its creator frees (the thread's end leaves it
+ * registered and calls no hook) */
+int lx_haiku_task_register_owned(lx_thread_id thread, void *task);
 void lx_haiku_task_unregister(lx_thread_id thread);
 void lx_haiku_set_task_exit_hook(void (*hook)(void *task));
 
