@@ -2,6 +2,11 @@
 /*
  * Copyright (C) 2026, Advanced Micro Devices, Inc.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: lines for the bring-up log before and
+ * after the steps that touch the hardware (lx_step()). The changes are in
+ * the history of https://github.com/airos-works/linux-drm
+ */
 
 #include "drm/amdxdna_accel.h"
 #include <drm/drm_device.h>
@@ -35,6 +40,7 @@ static int aie_smu_exec(struct smu_device *smu, u32 reg_cmd, u32 reg_arg, u32 *o
 	u32 resp;
 	int ret;
 
+	lx_step(1, "smu: command %u, argument %#x", reg_cmd, reg_arg);
 	writel(0, SMU_REG(smu, SMU_RESP_REG));
 	writel(reg_arg, SMU_REG(smu, SMU_ARG_REG));
 	writel(reg_cmd, SMU_REG(smu, SMU_CMD_REG));
@@ -45,6 +51,7 @@ static int aie_smu_exec(struct smu_device *smu, u32 reg_cmd, u32 reg_arg, u32 *o
 
 	ret = readx_poll_timeout(readl, SMU_REG(smu, SMU_RESP_REG), resp,
 				 resp, AIE_INTERVAL, AIE_TIMEOUT);
+	lx_step(1, "smu: command %u answered %#x (%d)", reg_cmd, resp, ret);
 	if (ret) {
 		drm_err(smu->ddev, "smu cmd %d timed out", reg_cmd);
 		return ret;

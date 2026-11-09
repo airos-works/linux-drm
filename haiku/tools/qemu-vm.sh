@@ -7,7 +7,9 @@
 #
 # For the NPU driver: ADDON=amdxdna (its binary is out-xdna/amdxdna, its
 # device directory dev/npu). A machine of one's own next to someone else's:
-# DIR, PORT and VNC (the display number).
+# DIR, PORT and VNC (the display number). QEMU_EXTRA: more arguments for
+# QEMU ("-device megasas-gen2" gives the NPU driver's stand-in for the
+# hardware, "haiku_selftest 3", a PCI function with MSI-X to dress up).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BASE=${BASE:-/mnt/HaikuWork/x399/evidence/wx5100/qemu-isolated/disk.qcow2}
@@ -34,7 +36,8 @@ case "${1:-}" in
 			-netdev user,id=n,hostfwd=tcp:127.0.0.1:$PORT-:22 -device e1000,netdev=n \
 			-vga std -display none -vnc 127.0.0.1:$VNC \
 			-qmp unix:"$DIR/qmp.sock",server=on,wait=off \
-			-serial file:"$DIR/serial.log" -pidfile "$DIR/qemu.pid" -daemonize
+			-serial file:"$DIR/serial.log" -pidfile "$DIR/qemu.pid" -daemonize \
+			${QEMU_EXTRA:-}
 		for i in $(seq 1 60); do
 			$SSH true 2>/dev/null && { echo "up"; exit 0; }
 			sleep 2

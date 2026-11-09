@@ -16,7 +16,7 @@
 		behind the node: also runs on the device without hardware of a
 		virtual machine (driver settings: "haiku_selftest 2").
 	xdna_test [-d <device>] [-t <ms>] [-n <runs>] [-o <file>] [-b]
-			[-p <mode>] run <design dir>
+			[-p <mode>] [-x] run <design dir>
 		loads a design and runs it: <design dir>/manifest.txt names the
 		configuration (a raw PDI, as mlir-aie's aiecc writes it), the
 		instruction sequence and the buffers with their contents, the
@@ -27,6 +27,14 @@
 		the default is in words, as its C++ tests do. -p sets the NPU's
 		power mode first (enum amdxdna_power_mode_type: 0 default, 1 low,
 		2 medium, 3 high, 4 turbo; it stays until the NPU is powered down).
+		-x leaves the output unchecked: for the driver's stand-in for the
+		hardware in a virtual machine ("haiku_selftest 3"), which answers
+		commands and computes nothing.
+
+	xdna_test [-d <device>] set <parameter> <value>
+		changes a parameter of the driver while it runs, as its settings
+		file does when it is loaded (keep_powered, autosuspend_ms, step_log,
+		debug, ...). The node is opened for it, which starts the NPU.
 
 	"buffers" counts the free buffer memory before and after: run it alone.
 
@@ -76,6 +84,7 @@ static const char *const kCmdStates[] = {
 
 static int sFd = -1;
 static int sFailures;
+static int sNoCheck;
 
 
 static void
@@ -208,11 +217,18 @@ bo_sync(struct buffer *bo, uint32_t direction, void *memory)
 		.direction = direction,
 		.size = bo->size,
 	};
+	static int unsupported;
 	uint64_t offset;
 
-	if (ioctl(sFd, DRM_IOCTL_AMDXDNA_SYNC_BO, &sync) == 0)
-		return 0;
-	if (errno != EOPNOTSUPP || memory == NULL)
+	/* (asked once: the driver logs every refusal as an error) */
+	if (!unsupported) {
+		if (ioctl(sFd, DRM_IOCTL_AMDXDNA_SYNC_BO, &sync) == 0)
+			return 0;
+		if (errno != EOPNOTSUPP)
+			return -1;
+		unsupported = 1;
+	}
+	if (memory == NULL)
 		return -1;
 	__builtin_ia32_mfence();
 	for (offset = 0; offset < bo->size; offset += 64)
@@ -826,7 +842,7 @@ run_design(const char *directory, unsigned timeout, int runs,
 
 		for (i = 0; i < design.buffer_count; i++) {
 			struct design_buffer *buffer = &design.buffers[i];
-			if (!buffer->output)
+			if (!buffer->output || sNoCheck)
 				continue;
 			bo_sync(&buffer->bo, SYNC_DIRECT_FROM_DEVICE, buffer->bo.map);
 			if (compare(buffer, buffer->file) != 0)
@@ -863,7 +879,7 @@ main(int argc, char **argv)
 	int option;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	while ((option = getopt(argc, argv, "d:t:n:o:bp:")) != -1) {
+	while ((option = getopt(argc, argv, "d:t:n:o:bp:x")) != -1) {
 		switch (option) {
 			case 'd': device = optarg; break;
 			case 't': timeout = strtoul(optarg, NULL, 0); break;
@@ -871,12 +887,14 @@ main(int argc, char **argv)
 			case 'o': outputFile = optarg; break;
 			case 'b': sizeInBytes = 1; break;
 			case 'p': powerMode = atoi(optarg); break;
+			case 'x': sNoCheck = 1; break;
 			default: argc = 0; break;
 		}
 	}
 	if (optind >= argc) {
 		printf("usage: xdna_test [-d <device>] info | buffers | "
-			"[-t <ms>] [-n <runs>] [-o <file>] [-b] [-p <mode>] "
+			"set <parameter> <value> | "
+			"[-t <ms>] [-n <runs>] [-o <file>] [-b] [-p <mode>] [-x] "
 			"run <design dir>\n");
 		return 2;
 	}
@@ -907,6 +925,13 @@ main(int argc, char **argv)
 		test_buffers();
 	else if (!strcmp(argv[optind], "run") && optind + 1 < argc)
 		run_design(argv[optind + 1], timeout, runs, outputFile, sizeInBytes);
+	else if (!strcmp(argv[optind], "set") && optind + 2 < argc) {
+		struct drm_haiku_set_param param = {};
+		strncpy(param.name, argv[optind + 1], sizeof(param.name) - 1);
+		strncpy(param.value, argv[optind + 2], sizeof(param.value) - 1);
+		CHECK(ioctl(sFd, DRM_HAIKU_IOCTL_SET_PARAM, &param) == 0,
+			"%s = %s", param.name, param.value);
+	}
 	else {
 		printf("unknown command %s\n", argv[optind]);
 		return 2;

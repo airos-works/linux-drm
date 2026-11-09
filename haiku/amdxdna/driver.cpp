@@ -15,9 +15,9 @@
 	in the bus manager's list and takes the memory the NPU's buffers will
 	be made of: a long run of pages, which is only there to be had while
 	the machine is fresh (glue.c). The first open starts the Linux side,
-	loads the firmware and powers the NPU up; when the last client closes
-	the node, the NPU is powered down again, and the next open powers it
-	up.
+	loads the firmware and powers the NPU up; five seconds after the last
+	client has closed the node (as Linux does it; "autosuspend_ms"), the NPU
+	is powered down again, and the next open powers it up.
 
 	The NPU reads and writes physical memory at the addresses its clients
 	put into their commands (there is no IOMMU driver to confine it, see
@@ -31,8 +31,14 @@
 	nothing is held on a machine that never uses the NPU, at the risk of
 	finding none later), "log_file <path>" (a
 	synced copy of the driver's messages, see compat/src/vsprintf.c),
-	"haiku_selftest 1|2" (without an NPU: test the compat layer, or offer a
-	device without hardware). */
+	"autosuspend_ms <ms>" (how long the NPU stays powered without a client,
+	5000; 0: not at all), "keep_powered 1" (never power it down once it was
+	started: a bring-up aid), "step_log 0|1|2" (lines before and after the
+	steps that touch the hardware: none, those of power, contexts and
+	interrupt handlers, or every message to the firmware as well),
+	"haiku_selftest 1|2|3" (without an NPU: test the compat layer, offer a
+	device without hardware, or drive a stand-in for the hardware in a
+	virtual machine, see fakefw.c). */
 
 #include <new>
 #include <stdio.h>
@@ -146,7 +152,8 @@ static char* sDeviceNames[2];
 static bool sFound;
 static pci_info sInfo;
 
-// 0: none, 1: test the compat layer and stop, 2: a device without hardware
+// 0: none, 1: test the compat layer and stop, 2: a device without hardware,
+// 3: a stand-in for the hardware in a virtual machine (power as on the NPU)
 static int sSelfTest;
 
 /*	What has been started; sStateLock serializes starting, stopping and the
@@ -159,6 +166,14 @@ static bool sDeviceUp;
 static bool sPowered;
 	// ... and is powered up now
 static int32 sOpenCount;
+
+/*	The NPU is powered down a while after its last client has gone, by a
+	thread that waits for that time (sIdleDeadline, 0: nothing to do; set and
+	cleared under sStateLock). */
+static thread_id sIdleThread = -1;
+static sem_id sIdleSem = -1;
+static bigtime_t sIdleDeadline;
+static bool sIdleQuit;
 
 
 // #pragma mark - errors
@@ -778,10 +793,11 @@ power_hook(void* cookie, bool resume, int32 state)
 				"this sleep\n");
 			return B_OK;
 		}
-		if (sDeviceUp && sPowered && sSelfTest == 0) {
+		if (sDeviceUp && sPowered && sSelfTest != 2) {
 			close_door();
 			if (lx_glue_suspend() == 0) {
 				sPowered = false;
+				sIdleDeadline = 0;
 				sSuspendedForSleep = true;
 			} else
 				open_door();
@@ -793,10 +809,13 @@ power_hook(void* cookie, bool resume, int32 state)
 	if (sSuspendedForSleep) {
 		MutexLocker locker(sStateLock);
 		sSuspendedForSleep = false;
-		if (lx_glue_resume() == 0)
-			sPowered = true;
-		else
-			TRACE("the NPU did not come back: its clients' calls fail\n");
+		// without a client it stays down until the next open
+		if (sOpenCount > 0 || lx_glue_keep_powered()) {
+			if (lx_glue_resume() == 0)
+				sPowered = true;
+			else
+				TRACE("the NPU did not come back: its clients' calls fail\n");
+		}
 		open_door();
 	}
 	return B_OK;
@@ -804,6 +823,9 @@ power_hook(void* cookie, bool resume, int32 state)
 
 
 // #pragma mark - starting and stopping
+
+
+static void start_idle_thread();
 
 
 /*!	Starts what is not running yet: the Linux side, the NPU (or the device
@@ -837,6 +859,8 @@ start_device()
 		int error;
 		if (sSelfTest == 2) {
 			error = lx_glue_fake_start();
+		} else if (sSelfTest == 3) {
+			error = lx_glue_emulated_start();
 		} else {
 			if (previous_start_unfinished()) {
 				dprintf(DRIVER_NAME ": the last start of the NPU did not "
@@ -853,10 +877,11 @@ start_device()
 			return haiku_status(error);
 		sDeviceUp = true;
 		sPowered = true;
+		start_idle_thread();
 		return B_OK;
 	}
 
-	if (!sPowered && sSelfTest == 0) {
+	if (!sPowered && sSelfTest != 2) {
 		int error = lx_glue_resume();
 		if (error != 0)
 			return haiku_status(error);
@@ -866,14 +891,96 @@ start_device()
 }
 
 
-/*!	No client is left: the NPU is powered down. sStateLock must be held. */
+/*!	Powers the NPU down, if it is up. sStateLock must be held. */
 static void
-idle_device()
+power_down()
 {
-	if (sDeviceUp && sPowered && sSelfTest == 0) {
+	sIdleDeadline = 0;
+	if (sDeviceUp && sPowered && sSelfTest != 2) {
 		if (lx_glue_suspend() == 0)
 			sPowered = false;
 	}
+}
+
+
+/*!	No client is left: the NPU is powered down, in a while (the settings
+	say when, if at all). sStateLock must be held. */
+static void
+idle_device()
+{
+	if (!sDeviceUp || !sPowered || sSelfTest == 2 || lx_glue_keep_powered())
+		return;
+	bigtime_t delay = (bigtime_t)lx_glue_autosuspend_ms() * 1000;
+	if (delay == 0 || sIdleThread < 0) {
+		power_down();
+		return;
+	}
+	sIdleDeadline = system_time() + delay;
+	release_sem_etc(sIdleSem, 1, B_DO_NOT_RESCHEDULE);
+}
+
+
+/*!	Waits for the time the NPU is to be powered down at; woken whenever
+	that time changes. */
+static status_t
+idle_thread(void*)
+{
+	while (!sIdleQuit) {
+		bigtime_t deadline = atomic_get64(&sIdleDeadline);
+		status_t status = deadline != 0
+			? acquire_sem_etc(sIdleSem, 1, B_ABSOLUTE_TIMEOUT, deadline)
+			: acquire_sem(sIdleSem);
+		if (sIdleQuit || (status != B_TIMED_OUT && status != B_OK))
+			break;
+		if (status != B_TIMED_OUT)
+			continue;
+
+		enter_call();
+		{
+			MutexLocker locker(sStateLock);
+			// still nobody, and the time was not put off meanwhile
+			if (sOpenCount == 0 && sIdleDeadline != 0
+				&& system_time() >= sIdleDeadline) {
+				power_down();
+			}
+		}
+		leave_call();
+	}
+	return B_OK;
+}
+
+
+static void
+start_idle_thread()
+{
+	if (sIdleThread >= 0)
+		return;
+	sIdleQuit = false;
+	sIdleSem = create_sem(0, DRIVER_NAME " idle");
+	if (sIdleSem < 0)
+		return;
+	sIdleThread = spawn_kernel_thread(&idle_thread, DRIVER_NAME " idle",
+		B_NORMAL_PRIORITY, NULL);
+	if (sIdleThread < 0) {
+		delete_sem(sIdleSem);
+		sIdleSem = -1;
+		return;
+	}
+	resume_thread(sIdleThread);
+}
+
+
+static void
+stop_idle_thread()
+{
+	if (sIdleThread < 0)
+		return;
+	sIdleQuit = true;
+	delete_sem(sIdleSem);
+	status_t result;
+	wait_for_thread(sIdleThread, &result);
+	sIdleThread = -1;
+	sIdleSem = -1;
 }
 
 
@@ -901,6 +1008,8 @@ device_open(const char* name, uint32 flags, void** _cookie)
 
 	enter_call();
 	MutexLocker locker(sStateLock);
+	// a client: the NPU stays up
+	sIdleDeadline = 0;
 	status_t status = start_device();
 	if (status == B_OK) {
 		int error;
@@ -942,8 +1051,10 @@ device_free(void* _cookie)
 	lx_glue_close(cookie->file);
 	{
 		MutexLocker locker(sStateLock);
-		if (--sOpenCount == 0)
+		if (--sOpenCount == 0) {
+			lx_glue_note_idle();
 			idle_device();
+		}
 	}
 	leave_call();
 	mutex_destroy(&cookie->lock);
@@ -1130,6 +1241,9 @@ init_driver(void)
 	if (sSelfTest == 2) {
 		TRACE("self test: /dev/" DEVICE_NAME " will be a device without "
 			"hardware\n");
+	} else if (sSelfTest == 3) {
+		TRACE("self test: /dev/" DEVICE_NAME " will be a stand-in for the "
+			"NPU's hardware\n");
 	} else {
 		TRACE("NPU %04x:%04x rev %02x at %d:%d.%d: /dev/" DEVICE_NAME
 			" starts it when opened\n", sInfo.vendor_id, sInfo.device_id,
@@ -1151,6 +1265,7 @@ uninit_driver(void)
 	// devfs unloads the driver in its driver lock, when its device is not
 	// open: no file system work here (see haiku/amdgpu/driver.cpp)
 	TRACE("uninit_driver\n");
+	stop_idle_thread();
 	if (sPowerHookRegistered) {
 		device_manager_remove_power_hook(&power_hook, NULL);
 		sPowerHookRegistered = false;

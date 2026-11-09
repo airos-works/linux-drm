@@ -4,11 +4,20 @@ State on 2026-11-09 (firmware 1.1.2.64, 8 columns, 6 rows): steps 3 to 5
 have passed on the laptop, the NPU powered up and down some ten times, and
 the convolution's output was the expected one byte for byte: the NPU rounds
 exact halves away from zero, as the kit does. Then the laptop stopped
-answering at the start of one more `xdna_test run` (cause not known yet; see
-"If the machine stops"). Step 6, the memory taken at load and the launch job
-have run in a virtual machine only. There is no remote power control: have
-somebody at the machine. Stop at the first step whose check fails and keep
-the syslog (`/var/log/syslog`, lines with `amdxdna`) and the log file.
+answering at the start of one more `xdna_test run`. Run against a stand-in
+for the hardware in a virtual machine afterwards (`haiku_selftest 3`), the
+same sessions stopped that machine too, in the second session: a fault of
+the compat layer that frees a kernel thread's task twice when the thread's
+end and `kthread_stop()` meet, which the laptop's kernel answers with a
+panic (`object_cache: object … is already freed`) - over the network, a
+machine that no longer answers. Every session stopped about five such
+threads (interrupt handlers and work queues).
+That fault and a second one found the same way are fixed; whether the first
+was the laptop's is what "After the hang" below finds out. Step 6, the
+memory taken at load, the launch job and the delayed power down have run in
+a virtual machine only. There is no remote power control: have somebody at
+the machine. Stop at the first step whose check fails and keep the syslog
+(`/var/log/syslog`, lines with `amdxdna`) and the log file.
 
 Host paths are those of the build server; `$L` is the laptop
 (`FW_URL=http://<laptop>:7780/mcp`, `fw13/tools/fwput`, `fwsh`), `$NP` is
@@ -93,7 +102,8 @@ for long can fail).
 Run as root (the default user is). This opens the node: firmware, power
 (and the buffer memory, if there was none at load).
 
-- [ ] syslog, in this order:
+- [ ] syslog, in this order, with `step: …` lines between them (every SMU
+      and PSP command and its answer, the interrupt handler installed):
       `starting the NPU: marker made` ·
       `starting <PCI name> (1022:17f0 rev 20)` ·
       `Load firmware amdnpu/17f0_10/npu_7.sbin` ·
@@ -102,8 +112,8 @@ Run as root (the default user is). This opens the node: firmware, power
       `Use carveout mem` ·
       `… started: firmware <a.b.c.d>, NPU Krackan …`
 - [ ] the program prints the array (8 columns and 6 rows are expected),
-      the firmware version, then `PASS`; the syslog ends with
-      `NPU powered down`
+      the firmware version, then `PASS`; five seconds later the syslog
+      ends with `NPU powered down` and a line of counts
 - [ ] no `amdxdna.starting` file is left
 
 What a failure looks like (the open fails, nothing hangs; every wait has a
@@ -127,11 +137,14 @@ back as configured` · `… MSI-X settings were lost`.
 - [ ] `xdna_test run bundles/<key>` (the bundle's data, even weights) → `PASS`
 - [ ] if a command is not answered, try `xdna_test -b run …` (the size of
       the instructions in bytes) and note which one works
-- [ ] after each run the syslog says `powering the NPU down`, `NPU powered
-      down`; the second run of anything says `powering the NPU up`, `NPU
-      powered up` first (the resume path)
+- [ ] five seconds after a run the syslog says `powering the NPU down`, the
+      steps of it (`step: …`), `NPU powered down` and a line of counts; the
+      next run of anything says `powering the NPU up`, `NPU powered up`
+      first (the resume path). Runs that follow one another sooner find the
+      NPU running
 - [ ] the same many times: `xdna_test -n 200 run designs/conv2d`, and twenty
-      times `xdna_test run designs/passthrough_kernel`
+      times `xdna_test run designs/passthrough_kernel` (see "After the
+      hang" for the order: first without power cycles, `keep_powered 1`)
 
 ## 6. The Neural Kit
 
@@ -159,16 +172,91 @@ back as configured` · `… MSI-X settings were lost`.
   nothing else of `amdxdna` until something opens the node
   (`launch_roster info x-vnd.airos-amdxdna-reserve` shows the job)
 
+## After the hang of 2026-11-09
+
+Nothing opens the node by itself after a boot: the old driver (the build of
+2026-11-09, without the fixes) is still installed and must be replaced
+before anything does.
+
+1. Before the power cycle, the screen: a kernel debugger's text with
+   `object_cache: object … is already freed` and `kthread_stop` in the
+   trace is the fault fixed since. A photo of whatever is there.
+2. After the boot, read what the old driver left:
+
+   ```
+   ls /boot/home/config/settings/kernel/drivers/amdxdna.starting   # no such file
+   tr -d '\0' < /boot/home/amdxdna.log | tail -n 20
+   grep -a amdxdna /var/log/syslog.1 /var/log/syslog | tail -n 30
+   ```
+
+   The log's last line was written before the machine stopped: `NPU powered
+   up` (20:44:06) means it died in that session or in the power down at its
+   end (the old driver writes nothing between the two), `NPU powered down`
+   after it.
+3. Within minutes of the boot (the memory), the settings first, then the
+   new driver over the old one, then the launch job:
+
+   ```
+   cat > /boot/home/config/settings/kernel/drivers/amdxdna <<EOF
+   log_file /boot/home/amdxdna.log
+   step_log 2
+   keep_powered 1
+   EOF
+   cp amdxdna /boot/home/amdxdna.staged && chmod 755 /boot/home/amdxdna.staged
+   mv /boot/home/amdxdna.staged $NP/add-ons/kernel/drivers/bin/amdxdna
+   mkdir -p $NP/data/launch && cp launch-amdxdna $NP/data/launch/amdxdna
+   grep -a amdxdna /var/log/syslog | tail -n 8
+   ```
+
+   expected: `devfs: reload driver`, `parameter keep_powered = 1`, `NPU
+   1022:17f0 rev 20 … starts it when opened`, `buffer memory: 128 MiB at …`.
+4. With `keep_powered 1` the NPU is started once and never powered down:
+   commands are tried without power cycles.
+
+   ```
+   cd ~/xdna
+   ./xdna_test info
+   ./xdna_test -n 5 run designs/passthrough_kernel
+   for i in $(seq 20); do ./xdna_test run designs/passthrough_kernel | tail -n 1; done
+   ./xdna_test -n 200 run designs/conv2d | tail -n 3
+   ./xdna_test -p 4 -n 5 run designs/passthrough_kernel     # turbo: still 112 ms a command?
+   grep -a -c 'powering the NPU' /var/log/syslog             # no more than before these
+   ```
+5. Power down as it is meant to be, five seconds after the last close:
+
+   ```
+   ./xdna_test set keep_powered 0
+   for i in $(seq 10); do ./xdna_test run designs/passthrough_kernel | tail -n 1; sleep 7; done
+   grep -a 'counts at power down' /var/log/syslog | tail -n 3
+   ```
+
+   Each round: `powering the NPU up` … `NPU powered up`, and seven seconds
+   later `powering the NPU down` … `NPU powered down` and a line of counts,
+   whose numbers must not grow from line to line.
+6. Power down at once after every session, as on 2026-11-09:
+
+   ```
+   ./xdna_test set autosuspend_ms 0
+   for i in $(seq 30); do ./xdna_test run designs/passthrough_kernel | tail -n 1; done
+   ./xdna_test set autosuspend_ms 5000
+   ./xdna_test set step_log 1
+   ```
+7. Then step 6 (the kit), with the new `amdxdna.neural` and
+   `amdxdna_backend_test`.
+
 ## If the machine stops
 
 Do not repeat the step. Look at the screen first (a kernel debugger's text
 names the function). After the reboot, before anything opens the node: the
-end of `/boot/home/amdxdna.log` (it is synced line by line; the syslog may
-lack its last lines) says how far the driver was - `powering the NPU up`
-without `NPU powered up`: in the resume path; `NPU powered up` last: in a
-session (context, command) or right at its end; `powering the NPU down`
-last: in the suspend path. `debug 0x2` in the driver's settings before the
-next try adds the Linux driver's own debug lines to that log.
+end of `/boot/home/amdxdna.log` (`tr -d '\0' < … | tail`; it is synced line
+by line, the syslog may lack its last lines) is the last thing the driver
+did before the step that did not return: `step: smu: command 4, argument 0`
+without its `answered` line is the SMU's power off, `step: mailbox:
+removing the handler of interrupt …` the removal of an interrupt handler,
+and so on; with `step_log 2` every message to the firmware is there too.
+The next try then starts with `keep_powered 1` if the last lines are of
+powering down or up, and with the Linux driver's own debug lines (`debug
+0x2`) in either case.
 
 ## The marker
 

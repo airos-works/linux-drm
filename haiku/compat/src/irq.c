@@ -145,6 +145,23 @@ lx_irq_stats(void *dev_id, unsigned long *arrived, unsigned long *handled,
 }
 
 
+/* interrupt handlers installed now: one that is never removed shows as a
+ * count that grows */
+int lx_irq_count(void);
+
+int
+lx_irq_count(void)
+{
+	struct lx_irq *desc;
+	int count = 0;
+	mutex_lock(&lx_irqs_lock);
+	list_for_each_entry(desc, &lx_irqs, entry)
+		count++;
+	mutex_unlock(&lx_irqs_lock);
+	return count;
+}
+
+
 int
 request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
 	const char *name, void *dev)

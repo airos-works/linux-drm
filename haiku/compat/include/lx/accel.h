@@ -32,7 +32,11 @@
  * (lx/mm.h says no to every type, which suits the GPU drivers' questions) */
 #undef hypervisor_is_type
 #define hypervisor_is_type(type) \
-	((type) == X86_HYPER_NATIVE && !boot_cpu_has(X86_FEATURE_HYPERVISOR))
+	((type) == X86_HYPER_NATIVE \
+		&& (!boot_cpu_has(X86_FEATURE_HYPERVISOR) || lx_emulated_device))
+/* set while a stand-in for the hardware is driven in a virtual machine
+ * (haiku/amdxdna/fakefw.c) */
+extern int lx_emulated_device;
 
 /* a PCI driver's registration, as a module initialization function
  * (lx_module_init_<driver>_init) */
@@ -55,8 +59,27 @@
  * files, which Haiku does not have) */
 #define vm_insert_pages(vma, addr, pages, num)	(-EOPNOTSUPP)
 
-/* the BARs of a PCI device, mapped for as long as the driver has it */
+/* the BARs of a PCI device, mapped for as long as the driver has it; the
+ * hook, when set, may answer for a BAR instead (memory that stands in for
+ * a device's registers) */
 void __iomem *pcim_iomap(struct pci_dev *pdev, int bar, unsigned long maxlen);
+extern void __iomem *(*lx_pcim_iomap_hook)(struct pci_dev *pdev, int bar);
+
+/*	Bring-up aid: a line before and after every step that touches the
+	hardware, into the log (and the synced log file, which then tells where
+	a machine that stopped had got to). "step_log" in the settings: 0 none,
+	1 the steps of powering up and down, of contexts and of interrupt
+	handlers, 2 every message to and from the firmware as well. */
+extern int lx_step_log;
+void lx_step_print(const char *format, ...) __printf(1, 2);
+#define lx_step(level, format, ...) \
+	do { \
+		if (unlikely(READ_ONCE(lx_step_log) >= (level))) \
+			lx_step_print(format, ##__VA_ARGS__); \
+	} while (0)
+
+/* interrupt handlers installed now (compat/src/irq.c) */
+int lx_irq_count(void);
 
 /* Pages that are contiguous in physical memory and freed with the device's
  * resources. (Memory of the kernel heap, which kmalloc() returns, is only

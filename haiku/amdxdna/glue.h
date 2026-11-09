@@ -32,9 +32,18 @@ int lx_glue_suspend(void);
 int lx_glue_resume(void);
 void lx_glue_stop(void);
 
-/* lab aid: a device without hardware (buffers and mappings only) */
+/* how long the NPU stays powered after the last close (ms), and whether it
+   is powered down at all (settings: autosuspend_ms, keep_powered) */
+unsigned int lx_glue_autosuspend_ms(void);
+int lx_glue_keep_powered(void);
+/* the last client has gone: now and then, a line of counts for the log */
+void lx_glue_note_idle(void);
+/* lab aids: a device without hardware (buffers and mappings only), and a
+   PCI function of a virtual machine with a thread that plays the NPU's
+   firmware, SMU and PSP, started, suspended and resumed as the NPU is */
 int lx_glue_selftest(void);
 int lx_glue_fake_start(void);
+int lx_glue_emulated_start(void);
 
 void *lx_glue_open(int flags, int *error);
 void lx_glue_close(void *file);

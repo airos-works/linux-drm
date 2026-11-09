@@ -104,17 +104,34 @@ installed), and it only finds the device in the PCI bus manager's list and
 takes the buffer memory. The first open starts the Linux side, loads the
 firmware
 (`data/firmware/amdnpu/<device>_<revision>/npu_7.sbin`, else `npu.sbin`, in
-the usual firmware directories) and powers the NPU up; when the last client
-closes the node the driver's suspend path powers it down again (firmware
-stopped, the SMU told to cut power, bus mastering off), and the next open
-powers it up. Linux powers it down after five idle seconds even with the
-node open, and puts the PCI function into D3hot; here it is powered for as
-long as the node is open and stays in D0, as before the driver was loaded.
+the usual firmware directories) and powers the NPU up; five seconds after
+the last client has closed the node (`autosuspend_ms` in the settings; 0: at
+once) the driver's suspend path powers it down again (firmware stopped, the
+SMU told to cut power, bus mastering off), and the next open powers it up.
+Programs that open the node one after the other find it running, and SMU,
+PSP and firmware are not sent through a power cycle for each of them.
+`keep_powered 1` never powers it down once it was started (a bring-up aid).
+Linux powers it down after five idle seconds even with the node open, and
+puts the PCI function into D3hot; here it is powered for as long as the node
+is open and stays in D0, as before the driver was loaded.
 When the system suspends to idle (the kernel's deep sleep; power hooks), an
 NPU in use is suspended through the same path and resumed afterwards; one
 not in use is left alone. A start that stops the machine is not repeated:
 `~/config/settings/kernel/drivers/amdxdna.starting` exists during the first
 start after a boot, and while it exists the NPU is not started.
+
+**Bring-up log.** With `log_file <path>` in the settings every message also
+goes into that file, synced line by line (the file has to exist, filled
+with zeros). `step_log` says how much is written before and after the steps
+that touch the hardware (`lx_step()` in the Linux files): 1, the default,
+every SMU and PSP command, the waits for the firmware, the interrupt
+handlers installed and removed, contexts made and destroyed; 2 every message
+to and from the firmware as well; 0 nothing. After each power down there is
+a line of counts (`counts at power down <n>: …`: memory allocated by the
+Linux side and its largest allocation sites, interrupt handlers installed,
+the system's threads and semaphores): what is taken and not given back
+shows as a number that grows. A machine that stopped is read from the end
+of that file.
 
 **Firmware and packages.** `haiku/tools/package-amdxdna.sh [out dir
 [linux-firmware dir [LICENSE.amdnpu]]]` makes `amdnpu_firmwares` (the
@@ -141,6 +158,23 @@ made-up answers, hardware contexts hold nothing and every command is
 refused (`fake_submit_error <errno>`: 19, the default, as by a device that
 is gone, 5 as a command that failed), which is what the Neural Kit's back end is tried against in a
 virtual machine (`ADDON=amdxdna haiku/tools/qemu-vm.sh selftest`).
+`haiku_selftest 3` goes further (`haiku/amdxdna/fakefw.c`): amdxdna's own
+code for the hardware runs against a stand-in, a PCI function with MSI-X of
+the virtual machine (QEMU: `-device megasas-gen2`) dressed up as the NPU,
+whose BARs are memory in which a thread plays SMU, PSP and firmware: power
+on and off, the firmware's start, the mailbox channels with their
+interrupts (on the vectors Haiku allotted to the MSI-X entries), contexts
+and commands, which are answered and compute nothing (`xdna_test -x`). So
+starting, stopping, power down and up and the life of a context can be run
+thousands of times, by several programs at once
+(`haiku/tests/xdna/stress.sh`); a build with `KMALLOC_DEBUG=1` checks every
+`kfree()` meanwhile and keeps freed memory for a while to see who still
+writes to it. `xdna_test set <parameter> <value>` changes the driver's
+parameters while it runs (how soon the NPU is powered down, for one). This is how two faults of the
+compat layer were found that the first sessions on hardware ran into (a
+kernel thread's task freed twice when the thread's end and `kthread_stop()`
+met; an interrupt thread spinning for a lock whose first user it had
+preempted).
 `haiku/tests/xdna/make-bundle.py` turns the conv2d design into a design
 bundle for that back end (`amdxdna.neural` in the Haiku tree) and says where
 the design's arithmetic and the kit's agree;

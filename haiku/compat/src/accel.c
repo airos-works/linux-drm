@@ -26,6 +26,10 @@ lx_iomap_release(struct device *dev, void *res)
 }
 
 
+void __iomem *(*lx_pcim_iomap_hook)(struct pci_dev *pdev, int bar);
+int lx_emulated_device;
+
+
 void __iomem *
 pcim_iomap(struct pci_dev *pdev, int bar, unsigned long maxlen)
 {
@@ -33,6 +37,11 @@ pcim_iomap(struct pci_dev *pdev, int bar, unsigned long maxlen)
 	resource_size_t length = pci_resource_len(pdev, bar);
 	struct lx_iomap_devres *map;
 
+	if (lx_pcim_iomap_hook != NULL) {
+		void __iomem *address = lx_pcim_iomap_hook(pdev, bar);
+		if (address != NULL)
+			return address;
+	}
 	if (start == 0 || length == 0
 		|| (pci_resource_flags(pdev, bar) & IORESOURCE_MEM) == 0)
 		return NULL;
@@ -80,6 +89,26 @@ devm_get_free_pages(struct device *dev, gfp_t gfp, unsigned int order)
 	}
 	devres_add(dev, pages);
 	return pages->address;
+}
+
+
+/* #pragma mark - step log */
+
+
+int lx_step_log = 1;
+module_param_named(step_log, lx_step_log, int, 0644);
+
+
+void
+lx_step_print(const char *format, ...)
+{
+	char line[200];
+	va_list args;
+
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	printk(KERN_INFO KBUILD_MODNAME ": step: %s\n", line);
 }
 
 

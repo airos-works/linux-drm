@@ -2,6 +2,11 @@
 /*
  * Copyright (C) 2022-2024, Advanced Micro Devices, Inc.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: lines for the bring-up log before and
+ * after the steps that touch the hardware (lx_step()). The changes are in
+ * the history of https://github.com/airos-works/linux-drm
+ */
 
 #include <drm/drm_device.h>
 #include <drm/drm_managed.h>
@@ -316,6 +321,8 @@ mailbox_get_resp(struct mailbox_channel *mb_chann, struct xdna_msg_header *heade
 
 	MB_DBG(mb_chann, "opcode 0x%x size %d id 0x%x",
 	       header->opcode, header->total_size, header->id);
+	lx_step(2, "mailbox %d: answer to message %#x (id %#x, %u bytes)",
+		mb_chann->msix_irq, header->opcode, header->id, header->total_size);
 
 	/*
 	 * msg_id is slot | MAGIC_VAL and is reused as soon as the slot is
@@ -513,6 +520,8 @@ int xdna_mailbox_send_msg(struct mailbox_channel *mb_chann,
 	MB_DBG(mb_chann, "opcode 0x%x size %d id 0x%x",
 	       header->opcode, header->total_size, header->id);
 
+	lx_step(2, "mailbox %d: sending message %#x (id %#x, %u bytes)",
+		mb_chann->msix_irq, header->opcode, header->id, header->total_size);
 	ret = mailbox_send_msg(mb_chann, mb_msg);
 	if (ret) {
 		MB_DBG(mb_chann, "Error in mailbox send msg, ret %d", ret);
@@ -595,7 +604,9 @@ xdna_mailbox_start_channel(struct mailbox_channel *mb_chann,
 	mb_chann->i2x_head = mailbox_get_headptr(mb_chann, CHAN_RES_I2X);
 
 	/* Everything look good. Time to enable irq handler */
+	lx_step(1, "mailbox: installing the handler of interrupt %d", mb_irq);
 	ret = request_irq(mb_irq, mailbox_irq_handler, 0, MAILBOX_NAME, mb_chann);
+	lx_step(1, "mailbox: handler of interrupt %d installed (%d)", mb_irq, ret);
 	if (ret) {
 		MB_ERR(mb_chann, "Failed to request irq %d ret %d", mb_irq, ret);
 		kfree(mb_chann->msg_buf);
@@ -619,10 +630,15 @@ void xdna_mailbox_stop_channel(struct mailbox_channel *mb_chann)
 		return;
 
 	/* Disable an irq and wait. This might sleep. */
+	lx_step(1, "mailbox: removing the handler of interrupt %d",
+		mb_chann->msix_irq);
 	free_irq(mb_chann->msix_irq, mb_chann);
 
 	/* Cancel RX work and wait for it to finish */
+	lx_step(1, "mailbox: handler of interrupt %d removed; waiting for its "
+		"work", mb_chann->msix_irq);
 	drain_workqueue(mb_chann->work_q);
+	lx_step(1, "mailbox: channel of interrupt %d quiet", mb_chann->msix_irq);
 
 	/* Release any in-flight messages in the pool
 	 *

@@ -43,6 +43,7 @@
 #include "amdxdna_pci_drv.h"
 #include "amdxdna_pm.h"
 
+#include "fakefw.h"
 #include "glue.h"
 
 
@@ -104,6 +105,20 @@ module_param_named(carveout_at_load, haiku_carveout_at_load, bool, 0444);
 	whose command failed, for testing what a client makes of either. */
 static unsigned int haiku_fake_submit_error = ENODEV;
 module_param_named(fake_submit_error, haiku_fake_submit_error, uint, 0444);
+
+/*	How long the NPU stays powered after its last client has closed the
+	node, in milliseconds (Linux powers it down after five seconds without
+	a command; 0: at once). Programs that open the node again and again, as
+	tests do, then find it running, and SMU, PSP and firmware are not sent
+	through a power cycle for each. */
+static unsigned int haiku_autosuspend_ms = 5000;
+module_param_named(autosuspend_ms, haiku_autosuspend_ms, uint, 0644);
+
+/*	Bring-up aid: once started, the NPU is never powered down (until the
+	driver is unloaded or the system sleeps): for telling a problem of
+	running commands from one of powering down and up. */
+static bool haiku_keep_powered;
+module_param_named(keep_powered, haiku_keep_powered, bool, 0644);
 
 /* the device heap of amdxdna's AIE2 devices: aie2_pci.h's AIE2_DEVM_SIZE */
 #define HEAP_BYTES			((u64)SZ_64M)
@@ -322,18 +337,63 @@ carveout_attach(struct amdxdna_dev *xdna)
 /* #pragma mark - the NPU */
 
 
+unsigned int
+lx_glue_autosuspend_ms(void)
+{
+	return READ_ONCE(haiku_autosuspend_ms);
+}
+
+
 int
-lx_glue_start(int bus, int device, int function)
+lx_glue_keep_powered(void)
+{
+	return READ_ONCE(haiku_keep_powered);
+}
+
+
+/*	One line of counts, after every power down: what is allocated and
+	installed now. Whatever is taken per open, per context or per power
+	cycle and not given back shows as a number that grows from line to
+	line (the allocation sites as haiku/tools/symbolize-trace.sh takes
+	them). */
+static void
+log_counters(const char *when)
+{
+	static unsigned long lines;
+	char line[400];
+	int n;
+
+	n = scnprintf(line, sizeof(line), "%s %lu: ", when, ++lines);
+	n += lx_mm_stats(line + n, sizeof(line) - n);
+	n += scnprintf(line + n, sizeof(line) - n, "; sites");
+	n += lx_kmalloc_top(line + n, sizeof(line) - n, 4);
+	n += scnprintf(line + n, sizeof(line) - n, "; interrupt handlers %d; ",
+		lx_irq_count());
+	n += lx_haiku_resource_stats(line + n, sizeof(line) - n);
+	n += lx_fakefw_stats(line + n, sizeof(line) - n);
+	pr_info("amdxdna: counts at %s\n", line);
+}
+
+
+/* without power cycles in between (clients that follow one another within
+ * the time the NPU stays up): a line for every 64th time nobody is left */
+void
+lx_glue_note_idle(void)
+{
+	static unsigned long times;
+	if ((++times & 63) == 0)
+		log_counters("idle");
+}
+
+
+static int
+start_pdev(struct pci_dev *pdev)
 {
 	struct pci_driver *driver = lx_pci_registered_driver();
 	const struct pci_device_id *id;
-	struct pci_dev *pdev;
 	int error;
 
 	if (driver == NULL || npu != NULL || fake_started)
-		return -ENODEV;
-	pdev = lx_pci_dev_get(bus, device, function);
-	if (pdev == NULL)
 		return -ENODEV;
 	id = lx_pci_match(driver, pdev);
 	if (id == NULL)
@@ -377,6 +437,34 @@ lx_glue_start(int bus, int device, int function)
 }
 
 
+int
+lx_glue_start(int bus, int device, int function)
+{
+	struct pci_dev *pdev = lx_pci_dev_get(bus, device, function);
+	if (pdev == NULL)
+		return -ENODEV;
+	return start_pdev(pdev);
+}
+
+
+/*	Lab aid (haiku_selftest 3): the same start, of a PCI function of a
+	virtual machine dressed up as the NPU, with a thread for the hardware's
+	side (fakefw.c). */
+int
+lx_glue_emulated_start(void)
+{
+	struct pci_dev *pdev = lx_fakefw_start();
+	int error;
+
+	if (pdev == NULL)
+		return -ENODEV;
+	error = start_pdev(pdev);
+	if (error != 0)
+		lx_fakefw_stop();
+	return error;
+}
+
+
 /*	Powers the NPU down, as Linux does when no command has run for a while
 	(runtime PM) and when the system sleeps: the contexts are taken from the
 	firmware, the firmware is stopped and the SMU told to power the NPU off.
@@ -397,8 +485,10 @@ lx_glue_suspend(void)
 		pr_err("amdxdna: powering the NPU down failed: %d\n", error);
 		return error;
 	}
+	lx_step(1, "power down: bus mastering off");
 	pci_clear_master(npu);
 	pr_info("amdxdna: NPU powered down\n");
+	log_counters("power down");
 	return 0;
 }
 
@@ -440,7 +530,9 @@ lx_glue_stop(void)
 	npu->driver = NULL;
 	npu = NULL;
 	xdna_device = NULL;
+	lx_fakefw_stop();
 	pr_info("amdxdna: removed\n");
+	log_counters("removal");
 }
 
 

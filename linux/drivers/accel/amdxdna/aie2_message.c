@@ -2,6 +2,11 @@
 /*
  * Copyright (C) 2023-2024, Advanced Micro Devices, Inc.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: lines for the bring-up log before and
+ * after the steps that touch the hardware (lx_step()). The changes are in
+ * the history of https://github.com/airos-works/linux-drm
+ */
 
 #include <drm/amdxdna_accel.h>
 #include <drm/drm_cache.h>
@@ -220,7 +225,11 @@ int aie2_create_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_hwctx *hwct
 	req.pasid = amdxdna_pasid_on(hwctx->client) ? hwctx->client->pasid : 0;
 	req.context_priority = aie2_get_context_priority(ndev, hwctx);
 
+	lx_step(1, "context: asking the firmware for one (columns %u+%u)",
+		req.start_col, req.num_col);
 	ret = aie_send_mgmt_msg_wait(&ndev->aie, &msg);
+	lx_step(1, "context: firmware answered %d: context %u, interrupt vector "
+		"%u", ret, resp.context_id, resp.msix_id);
 	if (ret)
 		return ret;
 
@@ -292,8 +301,12 @@ int aie2_destroy_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_hwctx *hwc
 	if (!hwctx->priv->mbox_chann)
 		return 0;
 
+	lx_step(1, "context %u: closing its channel", hwctx->fw_ctx_id);
 	xdna_mailbox_stop_channel(hwctx->priv->mbox_chann);
+	lx_step(1, "context %u: telling the firmware to destroy it",
+		hwctx->fw_ctx_id);
 	ret = aie2_destroy_context_req(ndev, hwctx->fw_ctx_id);
+	lx_step(1, "context %u: destroyed (%d)", hwctx->fw_ctx_id, ret);
 	xdna_mailbox_free_channel(hwctx->priv->mbox_chann);
 	XDNA_DBG(xdna, "Destroyed fw ctx %d", hwctx->fw_ctx_id);
 	hwctx->priv->mbox_chann = NULL;

@@ -3,8 +3,10 @@
  * Copyright (C) 2023-2024, Advanced Micro Devices, Inc.
  */
 /*
- * Changed for air/OS (Haiku), 2026: the device starts without an IOMMU. The
- * changes are in the history of https://github.com/airos-works/linux-drm
+ * Changed for air/OS (Haiku), 2026: the device starts without an IOMMU;
+ * lines for the bring-up log before the steps of starting and stopping the
+ * hardware (lx_step()). The changes are in the history of
+ * https://github.com/airos-works/linux-drm
  */
 
 #include <drm/amdxdna_accel.h>
@@ -312,17 +314,24 @@ static void aie2_hw_stop(struct amdxdna_dev *xdna)
 		return;
 	}
 
+	lx_step(1, "stop: clock gating as at the start");
 	aie2_runtime_cfg(ndev, AIE2_RT_CFG_CLK_GATING, NULL);
+	lx_step(1, "stop: suspending the firmware");
 	aie2_mgmt_fw_fini(ndev);
+	lx_step(1, "stop: closing the management channel");
 	aie_destroy_chann(&ndev->aie, &ndev->aie.mgmt_chann);
 	drmm_kfree(&xdna->ddev, ndev->mbox);
 	ndev->mbox = NULL;
+	lx_step(1, "stop: PSP releases the firmware");
 	aie_psp_stop(ndev->aie.psp_hdl);
+	lx_step(1, "stop: SMU: lowest clocks, power off");
 	aie2_smu_fini(ndev);
+	lx_step(1, "stop: freeing the event buffers");
 	aie2_error_async_events_free(ndev);
 	pci_disable_device(pdev);
 
 	ndev->dev_status = AIE2_DEV_INIT;
+	lx_step(1, "stop: done");
 }
 
 static int aie2_hw_start(struct amdxdna_dev *xdna)
@@ -338,6 +347,7 @@ static int aie2_hw_start(struct amdxdna_dev *xdna)
 		return 0;
 	}
 
+	lx_step(1, "start: PCI command register (memory, bus master)");
 	ret = pci_enable_device(pdev);
 	if (ret) {
 		XDNA_ERR(xdna, "failed to enable device, ret %d", ret);
@@ -364,24 +374,29 @@ static int aie2_hw_start(struct amdxdna_dev *xdna)
 		goto disable_dev;
 	}
 
+	lx_step(1, "start: SMU: power off, power on");
 	ret = aie_smu_init(ndev->aie.smu_hdl);
 	if (ret) {
 		XDNA_ERR(xdna, "failed to init smu, ret %d", ret);
 		goto free_channel;
 	}
 
+	lx_step(1, "start: PSP validates and starts the firmware");
 	ret = aie_psp_start(ndev->aie.psp_hdl);
 	if (ret) {
 		XDNA_ERR(xdna, "failed to start psp, ret %d", ret);
 		goto fini_smu;
 	}
 
+	lx_step(1, "start: waiting for the firmware to be alive");
 	ret = aie2_get_mgmt_chann_info(ndev);
 	if (ret) {
 		XDNA_ERR(xdna, "firmware is not alive");
 		goto stop_psp;
 	}
 
+	lx_step(1, "start: firmware alive; interrupt vector %u of the "
+		"management channel", ndev->aie.mgmt_chan_idx);
 	mgmt_mb_irq = pci_irq_vector(pdev, ndev->aie.mgmt_chan_idx);
 	if (mgmt_mb_irq < 0) {
 		ret = mgmt_mb_irq;
@@ -411,24 +426,28 @@ static int aie2_hw_start(struct amdxdna_dev *xdna)
 		goto stop_psp;
 	}
 
+	lx_step(1, "start: configuring the firmware (messages)");
 	ret = aie2_mgmt_fw_init(ndev);
 	if (ret) {
 		XDNA_ERR(xdna, "initial mgmt firmware failed, ret %d", ret);
 		goto stop_fw;
 	}
 
+	lx_step(1, "start: clocks (SMU) and clock gating");
 	ret = aie2_pm_init(ndev);
 	if (ret) {
 		XDNA_ERR(xdna, "failed to init pm, ret %d", ret);
 		goto stop_fw;
 	}
 
+	lx_step(1, "start: asking the firmware for its versions");
 	ret = aie2_mgmt_fw_query(ndev);
 	if (ret) {
 		XDNA_ERR(xdna, "failed to query fw, ret %d", ret);
 		goto stop_fw;
 	}
 
+	lx_step(1, "start: registering the event buffers");
 	ret = aie2_error_async_events_alloc(ndev, AMDXDNA_MAX_ASYNC_EVENT_BUFS);
 	if (ret) {
 		XDNA_ERR(xdna, "Allocate async events failed, ret %d", ret);
@@ -437,6 +456,7 @@ static int aie2_hw_start(struct amdxdna_dev *xdna)
 
 	WRITE_ONCE(ndev->last_signal_ts, jiffies);
 	ndev->dev_status = AIE2_DEV_START;
+	lx_step(1, "start: done");
 
 	return 0;
 

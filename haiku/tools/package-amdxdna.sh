@@ -168,7 +168,9 @@ Settings: one "name value" line each in
 for the NPU's buffers (128), which the driver takes when it is loaded: a
 launch job (data/launch/amdxdna) has that happen early in the boot, while
 such a run of pages is free. "carveout_at_load 0" leaves the memory alone
-until the NPU is first started, when there may be none. A start of the NPU
+until the NPU is first started, when there may be none. The NPU is powered
+down five seconds after its last client has closed the node
+("autosuspend_ms <ms>"; "keep_powered 1": never). A start of the NPU
 that stops the machine is not repeated:
 ~/config/settings/kernel/drivers/amdxdna.starting exists
 while the NPU is started for the first time after a boot, and while it

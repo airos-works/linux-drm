@@ -4,7 +4,8 @@
  */
 /*
  * Changed for air/OS (Haiku), 2026: the firmware buffer comes from pages
- * that are contiguous in physical memory. The changes are in the history of
+ * that are contiguous in physical memory; lines for the bring-up log before
+ * and after each command (lx_step()). The changes are in the history of
  * https://github.com/airos-works/linux-drm
  */
 
@@ -66,6 +67,8 @@ static int psp_exec(struct psp_device *psp, u32 *reg_vals)
 	u32 ready;
 
 	/* Check for PSP ready before any write */
+	lx_step(1, "psp: command %#x: waiting for the PSP to be ready",
+		reg_vals[0]);
 	ret = readx_poll_timeout(readl, PSP_REG(psp, PSP_STATUS_REG), ready,
 				 FIELD_GET(PSP_STATUS_READY, ready),
 				 PSP_POLL_INTERVAL, PSP_POLL_TIMEOUT);
@@ -79,6 +82,8 @@ static int psp_exec(struct psp_device *psp, u32 *reg_vals)
 		writel(reg_vals[i], PSP_REG(psp, i));
 
 	/* clear and set PSP INTR register to kick off */
+	lx_step(1, "psp: command %#x (%#x %#x %#x): sending", reg_vals[0],
+		reg_vals[1], reg_vals[2], reg_vals[3]);
 	writel(0, PSP_REG(psp, PSP_INTR_REG));
 	writel(psp->conf.notify_val, PSP_REG(psp, PSP_INTR_REG));
 
@@ -92,6 +97,7 @@ static int psp_exec(struct psp_device *psp, u32 *reg_vals)
 	}
 
 	resp_code = readl(PSP_REG(psp, PSP_RESP_REG));
+	lx_step(1, "psp: command %#x answered %#x", reg_vals[0], resp_code);
 	if (resp_code) {
 		drm_err(psp->ddev, "fw return error 0x%x", resp_code);
 		return -EIO;
@@ -106,9 +112,11 @@ int aie_psp_waitmode_poll(struct psp_device *psp)
 	u32 mode_reg;
 	int ret;
 
+	lx_step(1, "psp: waiting for the firmware's wait mode");
 	ret = readx_poll_timeout(readl, PSP_REG(psp, PSP_PWAITMODE_REG), mode_reg,
 				 (mode_reg & 0x1) == 1,
 				 PSP_POLL_INTERVAL, PSP_POLL_TIMEOUT);
+	lx_step(1, "psp: wait mode register %#x (%d)", mode_reg, ret);
 	if (ret)
 		XDNA_ERR(xdna, "fw waitmode reg error, ret %d", ret);
 
