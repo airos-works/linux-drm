@@ -2,6 +2,10 @@
 /*
  * Copyright (C) 2023-2024, Advanced Micro Devices, Inc.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: the device starts without an IOMMU. The
+ * changes are in the history of https://github.com/airos-works/linux-drm
+ */
 
 #include <drm/amdxdna_accel.h>
 #include <drm/drm_device.h>
@@ -502,10 +506,17 @@ static int aie2_init(struct amdxdna_dev *xdna)
 		return -EINVAL;
 	}
 
+#ifndef __HAIKU_LINUX_COMPAT__
+	/*
+	 * Haiku has no IOMMU driver: the device is given physical addresses,
+	 * of buffers in the carveout memory the Haiku driver sets up before
+	 * a client can open the device (haiku/amdxdna).
+	 */
 	if (!xdna->group) {
 		XDNA_ERR(xdna, "Running without IOMMU not supported");
 		return -EINVAL;
 	}
+#endif
 
 	ndev = drmm_kzalloc(&xdna->ddev, sizeof(*ndev), GFP_KERNEL);
 	if (!ndev)

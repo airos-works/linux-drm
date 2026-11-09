@@ -2,6 +2,11 @@
 /*
  * Copyright (C) 2026, Advanced Micro Devices, Inc.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: the firmware buffer comes from pages
+ * that are contiguous in physical memory. The changes are in the history of
+ * https://github.com/airos-works/linux-drm
+ */
 
 #include <drm/drm_device.h>
 #include <drm/drm_managed.h>
@@ -186,7 +191,16 @@ static void *psp_alloc_fw_buf(struct psp_device *psp, const void *fw_data,
 	*buf_sz = ALIGN(fw_size, align);
 	alloc_sz = *buf_sz + align;
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	/*
+	 * Haiku: the PSP reads the buffer by its physical address, and memory
+	 * of Haiku's kernel heap is contiguous only within a page.
+	 */
+	buffer = (void *)devm_get_free_pages(psp->ddev->dev, GFP_KERNEL,
+					     get_order(alloc_sz));
+#else
 	buffer = drmm_kmalloc(psp->ddev, alloc_sz, GFP_KERNEL);
+#endif
 	if (!buffer)
 		return NULL;
 
