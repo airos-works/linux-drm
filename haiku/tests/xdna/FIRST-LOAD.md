@@ -174,6 +174,20 @@ back as configured` · `… MSI-X settings were lost`.
 
 ## After the hang of 2026-11-09
 
+*Done 2026-11-10:* the old log ended with `NPU powered up` and the sync
+errors of a run (the machine died in that session or its power down); the
+fixed driver was loaded 70 s after the boot (128 MiB found in 22 ms), and
+steps 4 to 7 all passed: `info`, 20 open/close cycles and 200 convolution
+runs with `keep_powered 1`, 10 runs with a power down 7 s after each and 30
+with `autosuspend_ms 0`, then the kit (`amdxdna_backend_test`: "the NPU
+computed: PASS" once the back end flushed its output buffers before the
+command, haiku 532d9f7aab; `neural compare` equal). The counts stayed level
+(kmalloc 258 to 270 objects over 42 power downs). `-p 4` (turbo) makes a
+pass-through command 3.9 ms instead of 112.5; the kit's bundle design takes
+0.12 ms in the default mode. The launch job reserved the memory at the next
+boot (found in 9 ms, 15.8 s after boot). Still to do: the lid test of step 7.
+
+
 Nothing opens the node by itself after a boot: the old driver (the build of
 2026-11-09, without the fixes) is still installed and must be replaced
 before anything does.
