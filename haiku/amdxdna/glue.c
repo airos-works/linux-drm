@@ -34,6 +34,7 @@
 
 #include "aie2_pci.h"
 #include "amdxdna_cbuf.h"
+#include "amdxdna_ctx.h"
 #include "amdxdna_gem.h"
 #include "amdxdna_pci_drv.h"
 #include "amdxdna_pm.h"
@@ -779,13 +780,114 @@ lx_glue_selftest(void)
 /* #pragma mark - device without hardware */
 
 /*	"haiku_selftest 2": amdxdna's DRM device without an NPU behind it, so
-	that opening the node, making buffers in the carveout memory, mapping
-	them into a team and closing can be tried in a virtual machine
-	(tests/xdna_fake.c). Contexts and commands need the NPU: every ioctl for
-	them fails with EOPNOTSUPP. Made as amdxdna_probe() makes the real one,
-	without the hardware's part. */
+	that everything short of running a design can be tried in a virtual
+	machine: opening the node, buffers in the carveout memory and their
+	mappings (tests/xdna_test.c), and what a client does around its
+	commands - it gets made-up answers about the array and the firmware,
+	hardware contexts that hold nothing, and a refusal (ENODEV) for every
+	command it submits, which is what a client has to cope with when the
+	NPU fails. Made as amdxdna_probe() makes the real device, without the
+	hardware's part. */
 
-static const struct amdxdna_dev_ops fake_ops = {};
+static int
+fake_get_aie_info(struct amdxdna_client *client,
+	struct amdxdna_drm_get_info *args)
+{
+	/* an array like the NPU of Strix and Krackan Point */
+	static const struct amdxdna_drm_query_aie_metadata metadata = {
+		.col_size = 0x100000,
+		.cols = 8,
+		.rows = 6,
+		.version = { .major = 0, .minor = 0 },
+		.core = { .row_count = 4, .row_start = 2, .dma_channel_count = 2,
+			.lock_count = 16, .event_reg_count = 4 },
+		.mem = { .row_count = 1, .row_start = 1, .dma_channel_count = 6,
+			.lock_count = 64, .event_reg_count = 8 },
+		.shim = { .row_count = 1, .row_start = 0, .dma_channel_count = 2,
+			.lock_count = 16, .event_reg_count = 4 },
+	};
+	static const struct amdxdna_drm_query_aie_version version = {};
+	static const struct amdxdna_drm_query_firmware_version firmware = {};
+	const void *answer;
+	size_t size;
+
+	switch (args->param) {
+	case DRM_AMDXDNA_QUERY_AIE_METADATA:
+		answer = &metadata;
+		size = sizeof(metadata);
+		break;
+	case DRM_AMDXDNA_QUERY_AIE_VERSION:
+		answer = &version;
+		size = sizeof(version);
+		break;
+	case DRM_AMDXDNA_QUERY_FIRMWARE_VERSION:
+		answer = &firmware;
+		size = sizeof(firmware);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	if (copy_to_user(u64_to_user_ptr(args->buffer), answer,
+			min_t(size_t, args->buffer_size, size)))
+		return -EFAULT;
+	return 0;
+}
+
+
+static int
+fake_hwctx_init(struct amdxdna_hwctx *hwctx)
+{
+	return 0;
+}
+
+
+static void
+fake_hwctx_fini(struct amdxdna_hwctx *hwctx)
+{
+}
+
+
+/* a compute unit's configuration has to be a buffer of the device heap, as
+ * for the real device (aie2_config_cu()) */
+static int
+fake_hwctx_config(struct amdxdna_hwctx *hwctx, u32 type, u64 value, void *buf,
+	u32 size)
+{
+	struct amdxdna_hwctx_param_config_cu *config = buf;
+	struct amdxdna_gem_obj *abo;
+	u32 i;
+
+	if (type != DRM_AMDXDNA_HWCTX_CONFIG_CU)
+		return -EOPNOTSUPP;
+	if (config->num_cus == 0
+		|| struct_size(config, cu_configs, config->num_cus) > size)
+		return -EINVAL;
+	for (i = 0; i < config->num_cus; i++) {
+		abo = amdxdna_gem_get_obj(hwctx->client, config->cu_configs[i].cu_bo,
+			AMDXDNA_BO_DEV);
+		if (abo == NULL)
+			return -EINVAL;
+		amdxdna_gem_put_obj(abo);
+	}
+	return 0;
+}
+
+
+static int
+fake_cmd_submit(struct amdxdna_hwctx *hwctx, struct amdxdna_sched_job *job,
+	u64 *seq)
+{
+	return -ENODEV;
+}
+
+
+static const struct amdxdna_dev_ops fake_ops = {
+	.get_aie_info = fake_get_aie_info,
+	.hwctx_init = fake_hwctx_init,
+	.hwctx_fini = fake_hwctx_fini,
+	.hwctx_config = fake_hwctx_config,
+	.cmd_submit = fake_cmd_submit,
+};
 
 
 /* as amdxdna_pci_drv.c's own release action, which amdxdna_probe() adds */

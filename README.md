@@ -122,8 +122,16 @@ captured output (`xdna_test -o`). The convolution's expected output follows
 the kernel's source; whether the NPU rounds exact halves the same way shows
 only on hardware (`reference.py check` says if mismatches are such halves). Without an NPU: `haiku_selftest 1` in the
 settings runs the driver's checks of the compat layer when it is loaded,
-`haiku_selftest 2` makes the node a device without hardware, on which
-`xdna_test buffers` runs (`ADDON=amdxdna haiku/tools/qemu-vm.sh selftest`).
+`haiku_selftest 2` makes the node a device without hardware: buffers and
+mappings are real (`xdna_test buffers`), questions about the array get
+made-up answers, hardware contexts hold nothing and every command is
+refused, which is what the Neural Kit's back end is tried against in a
+virtual machine (`ADDON=amdxdna haiku/tools/qemu-vm.sh selftest`).
+`haiku/tests/xdna/make-bundle.py` turns the conv2d design into a design
+bundle for that back end (`amdxdna.neural` in the Haiku tree) and says where
+the design's arithmetic and the kit's agree;
+`haiku/tests/xdna/FIRST-LOAD.md` is the checklist for the first start on
+hardware.
 `haiku/tools/check-kernel-symbols.sh <add-on> <kernel_x86_64>` checks a build
 against the kernel of the machine it is meant for.
 

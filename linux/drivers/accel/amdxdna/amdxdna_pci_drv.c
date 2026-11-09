@@ -2,6 +2,11 @@
 /*
  * Copyright (C) 2022-2024, Advanced Micro Devices, Inc.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: with carveout memory set up, an open
+ * does not try shared virtual addressing. The changes are in the history of
+ * https://github.com/airos-works/linux-drm
+ */
 
 #include <drm/amdxdna_accel.h>
 #include <drm/drm_accel.h>
@@ -125,7 +130,16 @@ static int amdxdna_drm_open(struct drm_device *ddev, struct drm_file *filp)
 	client->pasid = IOMMU_PASID_INVALID;
 	client->mm = current->mm;
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	/*
+	 * Haiku has no IOMMU driver: binding always fails, and said so in the
+	 * log at every open. With the carveout memory there (the Haiku driver
+	 * sets it up before the device can be opened) it is not tried.
+	 */
+	if (!amdxdna_iova_on(xdna) && !amdxdna_use_carveout(xdna)) {
+#else
 	if (!amdxdna_iova_on(xdna)) {
+#endif
 		/* No need to fail open since user may use pa + carveout later. */
 		if (amdxdna_sva_init(client)) {
 			XDNA_WARN(xdna, "PASID not available for pid %d", client->pid);
