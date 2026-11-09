@@ -1,8 +1,13 @@
-# Builds the amdgpu kernel add-on for Haiku x86_64.
+# Builds the amdgpu kernel add-on for Haiku x86_64, and the AMD NPU's.
 #
 #   make -f haiku/build/Makefile -j32 HAIKU_TOP=<haiku tree> \
 #       HAIKU_BUILD=<configured haiku build dir> [OUT=<dir>]
+#   make -f haiku/build/Makefile -j32 amdxdna [OUT=<dir>]
 #
+# "amdxdna" builds the NPU driver (haiku/amdxdna, Linux's
+# drivers/accel/amdxdna): an add-on of its own, from the same compat layer
+# and the part of the DRM core it uses, with its own objects (in out-xdna
+# unless OUT says otherwise).
 # HAIKU_TOP provides the kernel headers, HAIKU_BUILD the cross compiler (as
 # configured there), kernel.so to link against and the generated headers.
 # For a Haiku release (R1/beta6): HAIKU_TOP=<headers of the release's commit>
@@ -13,12 +18,25 @@
 # Targets: all (the add-on), core / amdgpu / compat (object groups),
 # check FILE=<file> (compile one Linux file, e.g. FILE=drivers/dma-buf/dma-fence.c).
 
-ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+THIS_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+ROOT := $(abspath $(dir $(THIS_MAKEFILE))/../..)
 LINUX := $(ROOT)/linux
 COMPAT := $(ROOT)/haiku/compat
-DRIVER := $(ROOT)/haiku/amdgpu
 BUILDDIR := $(ROOT)/haiku/build
+# which add-on: amdgpu (amdgpu_drm) or amdxdna; the "amdxdna" target sets it
+KIND ?= amdgpu
+ifeq ($(KIND),amdxdna)
+DRIVER := $(ROOT)/haiku/amdxdna
+ADDON_NAME := amdxdna
+OUT ?= $(ROOT)/out-xdna
+else
+DRIVER := $(ROOT)/haiku/amdgpu
+ADDON_NAME := amdgpu_drm
 OUT ?= $(ROOT)/out
+endif
+# Linux's module name: the prefix of the messages, and the driver's name for
+# the compat layer (KBUILD_MODNAME, LX_DRIVER_NAME)
+MODNAME := $(KIND)
 # absolute: the dependency files name their targets that way, and a relative
 # OUT would not match them (header changes would rebuild nothing)
 override OUT := $(abspath $(OUT))
@@ -38,7 +56,7 @@ HAIKU_KERNEL ?= $(HAIKU_OBJ)/system/kernel/kernel.so
 HAIKU_VERSION_GLUE ?= $(HAIKU_OBJ)/system/glue/haiku_version_glue.o
 GCC_SYSLIBS := $(firstword $(wildcard $(HAIKU_BUILD)/build_packages/gcc_syslibs_devel-*))
 
-ADDON := $(OUT)/amdgpu_drm
+ADDON := $(OUT)/$(ADDON_NAME)
 
 # Lab builds: make ... ARMED_ONLY=1 (see driver.cpp)
 HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY)
@@ -78,11 +96,19 @@ LXWARN := -Wall -Wno-unused -Wno-sign-compare -Wno-pointer-sign \
 	-Werror=return-type
 LXFLAGS := -std=gnu11 -nostdinc -fshort-wchar -funsigned-char $(KFLAGS) \
 	$(LXWARN) -D__KERNEL__ -D__HAIKU_LINUX_COMPAT__ \
+	-DLX_DRIVER_NAME='"$(ADDON_NAME)"' \
 	-include $(COMPAT)/include/lx/kconfig.h \
 	-I$(COMPAT)/include -I$(LINUX)/include -I$(LINUX)/include/uapi \
 	-isystem $(dir $(shell $(CC) -print-libgcc-file-name))include
 
+ifeq ($(KIND),amdxdna)
+# the glue sees the driver's own headers
+AMD_INCLUDES := -I$(LINUX)/drivers/accel/amdxdna
+# what the kernel configuration (generated/autoconf.h) adds for this add-on
+LXFLAGS += -DLX_ADDON_AMDXDNA
+else
 AMD_INCLUDES := $(addprefix -I$(LINUX)/,$(shell cat $(BUILDDIR)/includes-amdgpu.txt))
+endif
 
 # Haiku-side C++ (compat implementation and the driver): Haiku's headers.
 HAIKU_INCLUDES := -I$(COMPAT)/haiku -I$(DRIVER) \
@@ -110,6 +136,7 @@ HAIKU_INCLUDES := -I$(COMPAT)/haiku -I$(DRIVER) \
 	-I$(HAIKU_TOP)/headers/os/app -I$(HAIKU_TOP)/headers/os/interface \
 	-I$(HAIKU_TOP)/headers/os/add-ons/graphics
 HXXFLAGS := -std=gnu++20 -nostdinc $(KFLAGS) -fno-exceptions $(HAIKU_DEFINES) \
+	-DLX_DRIVER_NAME='"$(ADDON_NAME)"' \
 	-fno-use-cxa-atexit -D_KERNEL_MODE -D_DEFAULT_SOURCE -DARCH_x86_64 \
 	-DHAIKU_TARGET_PLATFORM_HAIKU -Wall -Wno-multichar \
 	-Wno-missing-field-initializers $(HAIKU_INCLUDES)
@@ -118,13 +145,23 @@ HCFLAGS := -std=gnu11 -nostdinc $(KFLAGS) -D_KERNEL_MODE -D_DEFAULT_SOURCE \
 
 # --- sources -----------------------------------------------------------------
 
+# the DRM core and Linux's library code: the same for both add-ons (the NPU
+# driver uses a small part of the core, but the core is not made to be split)
 CORE_SRCS := $(shell cat $(BUILDDIR)/sources-core.txt) \
 	lib/sort.c lib/list_sort.c lib/bsearch.c lib/rbtree.c lib/interval_tree.c \
 	lib/kstrtox.c lib/ctype.c lib/hexdump.c lib/math/gcd.c lib/scatterlist.c \
 	lib/kfifo.c lib/llist.c lib/refcount.c lib/string_helpers.c lib/uuid.c \
 	lib/math/div64.c lib/seq_buf.c lib/bitmap.c lib/find_bit.c drivers/gpu/buddy.c drivers/video/hdmi.c drivers/i2c/algos/i2c-algo-bit.c
+ifeq ($(KIND),amdxdna)
+# the NPU driver, with the core's accelerator nodes and buffer helper; no
+# floating point
+CORE_SRCS += drivers/gpu/drm/drm_gem_shmem_helper.c
+AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdxdna.txt)
+AMD_FP_SRCS :=
+else
 AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu.txt)
 AMD_FP_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu-fp.txt)
+endif
 LX_COMPAT_SRCS := $(wildcard $(COMPAT)/src/*.c)
 GLUE_SRCS := $(wildcard $(DRIVER)/*.c)
 HAIKU_SRCS := $(wildcard $(COMPAT)/haiku/*.cpp) $(wildcard $(DRIVER)/*.cpp)
@@ -140,8 +177,12 @@ ALL_OBJS := $(CORE_OBJS) $(AMD_OBJS) $(AMD_FP_OBJS) $(LX_COMPAT_OBJS) $(GLUE_OBJ
 	$(HAIKU_OBJS)
 
 # per-group flags; every Linux file also sees its own directory, like kbuild
+ifeq ($(KIND),amdxdna)
+$(AMD_OBJS): GROUP_FLAGS :=
+else
 $(AMD_OBJS) $(AMD_FP_OBJS): GROUP_FLAGS := $(AMD_INCLUDES) -DBUILD_FEATURE_TIMING_SYNC=0
 $(AMD_FP_OBJS): GROUP_FLAGS += -msse -msse2 -mhard-float -D_LINUX_FPU_COMPILATION_UNIT
+endif
 $(CORE_OBJS): GROUP_FLAGS :=
 TRACE_OBJS := $(call obj,$(filter-out compat/% glue/%,$(TRACE_CALLS))) \
 	$(patsubst compat/%.c,$(OUT)/obj/compat/%.o,$(filter compat/%,$(TRACE_CALLS))) \
@@ -150,8 +191,13 @@ $(TRACE_OBJS): GROUP_FLAGS += -finstrument-functions \
 	-finstrument-functions-exclude-file-list=/include/ \
 	-finstrument-functions-exclude-function-list=$(TRACE_EXCLUDE)
 
-.PHONY: all core amdgpu compat haiku clean
+.PHONY: all core amdgpu amdxdna compat haiku clean
 all: $(ADDON)
+ifneq ($(KIND),amdxdna)
+# the NPU driver: this Makefile again, for the other add-on
+amdxdna:
+	@$(MAKE) --no-print-directory -f $(THIS_MAKEFILE) all KIND=amdxdna
+endif
 core: $(CORE_OBJS)
 amdgpu: $(AMD_OBJS) $(AMD_FP_OBJS)
 compat: $(LX_COMPAT_OBJS)
@@ -161,18 +207,18 @@ $(OUT)/obj/linux/%.o: $(LINUX)/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   $*.c"
 	@$(CC) $(LXFLAGS) $(GROUP_FLAGS) -I$(dir $<) \
-		-DKBUILD_MODNAME='"amdgpu"' -DKBUILD_BASENAME='"$(notdir $*)"' \
+		-DKBUILD_MODNAME='"$(MODNAME)"' -DKBUILD_BASENAME='"$(notdir $*)"' \
 		-c $< -o $@
 
 $(OUT)/obj/compat/%.o: $(COMPAT)/src/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   compat/$*.c"
-	@$(CC) $(LXFLAGS) $(GROUP_FLAGS) -DKBUILD_MODNAME='"amdgpu"' -c $< -o $@
+	@$(CC) $(LXFLAGS) $(GROUP_FLAGS) -DKBUILD_MODNAME='"$(MODNAME)"' -c $< -o $@
 
 $(OUT)/obj/glue/%.o: $(DRIVER)/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   glue/$*.c"
-	@$(CC) $(LXFLAGS) $(AMD_INCLUDES) $(GROUP_FLAGS) -DKBUILD_MODNAME='"amdgpu"' \
+	@$(CC) $(LXFLAGS) $(AMD_INCLUDES) $(GROUP_FLAGS) -DKBUILD_MODNAME='"$(MODNAME)"' \
 		-c $< -o $@
 
 $(OUT)/obj/haiku/%.o: $(ROOT)/haiku/%.cpp
@@ -183,7 +229,7 @@ $(OUT)/obj/haiku/%.o: $(ROOT)/haiku/%.cpp
 check:
 	@mkdir -p $(OUT)/check
 	$(CC) $(LXFLAGS) $(if $(findstring /amd/,$(FILE)),$(AMD_INCLUDES) -DBUILD_FEATURE_TIMING_SYNC=0) \
-		-I$(dir $(LINUX)/$(FILE)) -DKBUILD_MODNAME='"amdgpu"' -c $(LINUX)/$(FILE) -o $(OUT)/check/x.o
+		-I$(dir $(LINUX)/$(FILE)) -DKBUILD_MODNAME='"$(MODNAME)"' -c $(LINUX)/$(FILE) -o $(OUT)/check/x.o
 
 $(ADDON): $(ALL_OBJS)
 	@echo "  LD   $@"
