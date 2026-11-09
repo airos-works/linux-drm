@@ -475,7 +475,18 @@ void lx_flush_page_array(struct page **pages, unsigned long count);
 #define arch_phys_wc_del(handle)		do { } while (0)
 #define arch_phys_wc_index(handle)		(-1)
 void clflush_cache_range(void *addr, unsigned int size);
-#define clflushopt(addr)	asm volatile("clflushopt %0" : "+m" (*(volatile char *)(addr)))
+/* (Linux patches the instruction into clflush on a processor without
+ * clflushopt, where it is an invalid opcode) */
+#define clflushopt(addr) \
+	do { \
+		if (likely(lx_cpu_has(X86_FEATURE_CLFLUSHOPT))) { \
+			asm volatile("clflushopt %0" \
+				: "+m" (*(volatile char *)(addr))); \
+		} else { \
+			asm volatile("clflush %0" \
+				: "+m" (*(volatile char *)(addr))); \
+		} \
+	} while (0)
 #define clflush(addr)		asm volatile("clflush %0" : "+m" (*(volatile char *)(addr)))
 #define wbinvd_on_all_cpus()	lx_wbinvd_on_all_cpus()
 int lx_wbinvd_on_all_cpus(void);
