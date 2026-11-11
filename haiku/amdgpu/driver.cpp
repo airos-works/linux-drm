@@ -1265,6 +1265,15 @@ armed_for_this_boot()
 	has run for half a minute; finding it means that the last start did not
 	get that far, and the driver stays off (the framebuffer driver drives the
 	display) until the marker is deleted.
+	One such start is forgiven, though: a boot can end within the half
+	minute without the driver's doing (the power button, a power cut, a
+	quick test reboot), and on machines whose firmware frame buffer shows
+	nothing after the boot splash's third icon (the AMD Framework 13 and
+	Framework Desktop) the driver staying off looks like a hang that never
+	goes away. So the marker counts the starts in a row that did not finish,
+	and the driver stays off only once kMaxUnfinishedStarts of them have; a
+	start that brings the machine down costs one more boot before that.
+	Older markers have no count and stand for one start.
 	Only a marker of an earlier boot counts: devfs may unload the driver and
 	start it again in the same boot (when its binary changed), and the
 	stopping driver leaves the marker alone, since it must not touch the
@@ -1272,9 +1281,13 @@ armed_for_this_boot()
 	stable timer deletes it. */
 static const char* kStartMarker
 	= "/boot/home/config/settings/kernel/drivers/amdgpu_drm.starting";
+static const char kUnfinishedLabel[] = "unfinished starts: ";
+static const int kMaxUnfinishedStarts = 2;
 static const bigtime_t kStableAfter = 30000000;
 static sem_id sStableSem = -1;
 static thread_id sStableThread = -1;
+static int sUnfinishedStarts = 0;
+	// of earlier boots, found by init_driver()
 
 
 static bool
@@ -1285,11 +1298,33 @@ marked_this_boot(const struct stat& st)
 }
 
 
-static bool
-previous_start_failed()
+/*	The starts of earlier boots in a row that did not finish: 0 without a
+	marker or with one of this boot (see above). */
+static int
+unfinished_starts()
 {
 	struct stat st;
-	return stat(kStartMarker, &st) == 0 && !marked_this_boot(st);
+	if (stat(kStartMarker, &st) != 0 || marked_this_boot(st))
+		return 0;
+
+	int count = 1;
+	int fd = _kern_open(-1, kStartMarker, O_RDONLY, 0);
+	if (fd < 0)
+		return count;
+	char buffer[256];
+	ssize_t length = _kern_read(fd, 0, buffer, sizeof(buffer) - 1);
+	_kern_close(fd);
+	if (length <= 0)
+		return count;
+	buffer[length] = '\0';
+	const char* number = strstr(buffer, kUnfinishedLabel);
+	if (number == NULL)
+		return count;
+	number += sizeof(kUnfinishedLabel) - 1;
+	int value = 0;
+	while (*number >= '0' && *number <= '9' && value < 1000)
+		value = value * 10 + *number++ - '0';
+	return value > 0 ? value : count;
 }
 
 
@@ -1307,9 +1342,11 @@ mark_start()
 		TRACE("cannot create %s: %s\n", kStartMarker, strerror(fd));
 		return;
 	}
-	static const char kText[] = "amdgpu_drm was starting; delete this file "
-		"to let it start again\n";
-	_kern_write(fd, 0, kText, sizeof(kText) - 1);
+	char text[160];
+	int length = snprintf(text, sizeof(text), "amdgpu_drm was starting; "
+		"delete this file to let it start again\n%s%d\n", kUnfinishedLabel,
+		sUnfinishedStarts + 1);
+	_kern_write(fd, 0, text, min_c(length, (int)sizeof(text) - 1));
 	_kern_fsync(fd, false);
 	_kern_close(fd);
 	sync_volumes();
@@ -1492,10 +1529,15 @@ init_driver(void)
 		return B_ERROR;
 	}
 #else
-	if (previous_start_failed()) {
-		dprintf(DRIVER_NAME ": the last start did not finish (%s exists); not "
-			"starting\n", kStartMarker);
+	sUnfinishedStarts = unfinished_starts();
+	if (sUnfinishedStarts >= kMaxUnfinishedStarts) {
+		dprintf(DRIVER_NAME ": the last %d starts did not finish (%s exists); "
+			"not starting\n", sUnfinishedStarts, kStartMarker);
 		return B_ERROR;
+	}
+	if (sUnfinishedStarts > 0) {
+		dprintf(DRIVER_NAME ": the last start did not finish (%s exists); "
+			"trying once more\n", kStartMarker);
 	}
 	if (desktop_runs_on_another_driver()) {
 		dprintf(DRIVER_NAME ": installed while app_server drives the screens "
@@ -1701,7 +1743,7 @@ uninit_driver(void)
 		sPinFile = -1;
 	}
 #ifndef AMDGPU_DRM_ARMED_ONLY
-	// a start marker stays (see previous_start_failed())
+	// a start marker stays (see unfinished_starts())
 	stop_stable_timer();
 #endif
 	for (int i = 0; i < sDeviceCount; i++)
