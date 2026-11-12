@@ -8,8 +8,8 @@
 	once, while a probe thread of the same team touches fresh pages and
 	records how long each page fault takes (jmgasper/haiku#36).
 
-	amdgpu_bo_bench [-s KiB] [-d vram|vramonly|gtt] [-w] [-t threads]
-		[-n count] [-k keep] [-v] [-p]
+	amdgpu_bo_bench [-s KiB] [-d vram|vramonly|gtt] [-w] [-c] [-l] [-t threads]
+		[-n count] [-k keep] [-v] [-m] [-T] [-p]
 
 	-s	buffer size in KiB (1024)
 	-d	vram: VRAM|GTT, as RADV asks for images (default); vramonly; gtt
@@ -17,7 +17,12 @@
 	-t	threads allocating at once (1)
 	-n	buffers per thread (200)
 	-k	buffers each thread keeps alive before freeing its oldest (0)
+	-c	VRAM cleared at creation (VRAM_CLEARED), as RADV asks
+	-l	local to the VM (VM_ALWAYS_VALID), as RADV makes most buffers
 	-v	also map each buffer into the GPU's address space (GEM_VA)
+	-m	also map each buffer for the CPU (amdgpu_bo_cpu_map), and unmap
+		it before freeing it; times both (jmgasper/haiku#110)
+	-T	with -m: write one byte to every page after mapping it
 	-p	run the page fault probe, alone for a second first
 
 	build on the machine: gcc -O2 -Wall -o amdgpu_bo_bench amdgpu_bo_bench.c
@@ -52,6 +57,8 @@ int amdgpu_device_deinitialize(amdgpu_device_handle device);
 int amdgpu_bo_alloc(amdgpu_device_handle device,
 	struct amdgpu_bo_alloc_request* request, amdgpu_bo_handle* bo);
 int amdgpu_bo_free(amdgpu_bo_handle bo);
+int amdgpu_bo_cpu_map(amdgpu_bo_handle bo, void** cpu);
+int amdgpu_bo_cpu_unmap(amdgpu_bo_handle bo);
 int amdgpu_va_range_alloc(amdgpu_device_handle device, int type,
 	uint64_t size, uint64_t alignment, uint64_t base_required,
 	uint64_t* va_base_allocated, amdgpu_va_handle* va_range_handle,
@@ -73,6 +80,8 @@ int amdgpu_query_heap_info(amdgpu_device_handle device, uint32_t heap,
 #define DOMAIN_VRAM			0x4
 #define CREATE_NO_CPU_ACCESS	(1 << 1)
 #define CREATE_CPU_GTT_USWC		(1 << 2)
+#define CREATE_VRAM_CLEARED		(1 << 3)
+#define CREATE_VM_ALWAYS_VALID	(1 << 6)
 #define CREATE_EXPLICIT_SYNC	(1 << 7)
 #define VA_OP_MAP			1
 #define VA_OP_UNMAP			2
@@ -85,6 +94,7 @@ static uint32_t sDomain = DOMAIN_VRAM | DOMAIN_GTT;
 static uint64_t sFlags = CREATE_NO_CPU_ACCESS | CREATE_EXPLICIT_SYNC;
 static int sCount = 200, sKeep = 0;
 static int sMapVA = 0;
+static int sMapCPU = 0, sTouch = 0;
 static volatile int sProbeStop;
 
 
@@ -126,14 +136,18 @@ struct buffer {
 	amdgpu_bo_handle bo;
 	amdgpu_va_handle va_handle;
 	uint64_t va;
+	void* cpu;
 };
 
 struct worker {
 	pthread_t thread;
 	double* alloc;
 	double* map;
+	double* cpumap;
+	double* touch;
+	double* cpuunmap;
 	double* release;
-	int allocated, mapped, released;
+	int allocated, mapped, cpumapped, touched, cpuunmapped, released;
 	int failed;
 };
 
@@ -141,7 +155,13 @@ struct worker {
 static void
 release_buffer(struct worker* worker, struct buffer* buffer)
 {
-	double t0 = now_ms();
+	double t0;
+	if (buffer->cpu != NULL) {
+		t0 = now_ms();
+		amdgpu_bo_cpu_unmap(buffer->bo);
+		worker->cpuunmap[worker->cpuunmapped++] = now_ms() - t0;
+	}
+	t0 = now_ms();
 	if (sMapVA) {
 		amdgpu_bo_va_op(buffer->bo, 0, sSize, buffer->va, 0, VA_OP_UNMAP);
 		amdgpu_va_range_free(buffer->va_handle);
@@ -181,6 +201,22 @@ allocate_loop(void* data)
 				worker->failed++;
 			}
 			worker->map[worker->mapped++] = now_ms() - t1;
+		}
+		if (sMapCPU) {
+			double t2 = now_ms();
+			if (amdgpu_bo_cpu_map(buffer.bo, &buffer.cpu) != 0) {
+				buffer.cpu = NULL;
+				worker->failed++;
+			} else {
+				double t3 = now_ms();
+				worker->cpumap[worker->cpumapped++] = t3 - t2;
+				if (sTouch) {
+					uint64_t offset;
+					for (offset = 0; offset < sSize; offset += 4096)
+						((volatile char*)buffer.cpu)[offset] = 1;
+					worker->touch[worker->touched++] = now_ms() - t3;
+				}
+			}
 		}
 		if (sKeep == 0) {
 			release_buffer(worker, &buffer);
@@ -301,7 +337,7 @@ main(int argc, char** argv)
 	double start, elapsed;
 	const char* domain = "vram";
 
-	while ((option = getopt(argc, argv, "s:d:wt:n:k:vp")) != -1) {
+	while ((option = getopt(argc, argv, "s:d:wclt:n:k:vmTp")) != -1) {
 		switch (option) {
 			case 's':
 				sSize = strtoull(optarg, NULL, 0) * 1024;
@@ -316,6 +352,19 @@ main(int argc, char** argv)
 				break;
 			case 'w':
 				sFlags |= CREATE_CPU_GTT_USWC;
+				break;
+			case 'c':
+				sFlags |= CREATE_VRAM_CLEARED;
+				break;
+			case 'l':
+				sFlags |= CREATE_VM_ALWAYS_VALID;
+				break;
+			case 'm':
+				sMapCPU = 1;
+				sFlags &= ~CREATE_NO_CPU_ACCESS;
+				break;
+			case 'T':
+				sTouch = 1;
 				break;
 			case 't':
 				threads = atoi(optarg);
@@ -334,7 +383,7 @@ main(int argc, char** argv)
 				break;
 			default:
 				fprintf(stderr, "usage: %s [-s KiB] [-d vram|vramonly|gtt] "
-					"[-w] [-t threads] [-n count] [-k keep] [-v] [-p]\n",
+					"[-w] [-c] [-l] [-t threads] [-n count] [-k keep] [-v] [-m] [-T] [-p]\n",
 					argv[0]);
 				return 1;
 		}
@@ -365,6 +414,9 @@ main(int argc, char** argv)
 	for (i = 0; i < threads; i++) {
 		workers[i].alloc = malloc(sCount * sizeof(double));
 		workers[i].map = malloc(sCount * sizeof(double));
+		workers[i].cpumap = malloc(sCount * sizeof(double));
+		workers[i].touch = malloc(sCount * sizeof(double));
+		workers[i].cpuunmap = malloc(sCount * sizeof(double));
 		workers[i].release = malloc(sCount * sizeof(double));
 		pthread_create(&workers[i].thread, NULL, allocate_loop, &workers[i]);
 	}
@@ -379,6 +431,8 @@ main(int argc, char** argv)
 		(unsigned long long)(sSize / 1024), domain,
 		(unsigned long long)sFlags, threads, sCount, sKeep,
 		sMapVA ? ", GEM_VA" : "", elapsed);
+	if (sMapCPU)
+		printf("  CPU mapped%s\n", sTouch ? ", every page touched" : "");
 	{
 		double* all = malloc(threads * sCount * sizeof(double));
 		int n, failed = 0;
@@ -392,6 +446,9 @@ main(int argc, char** argv)
 		report(label, all, n);
 		GATHER(alloc, allocated, "alloc")
 		GATHER(map, mapped, "va")
+		GATHER(cpumap, cpumapped, "cpumap")
+		GATHER(touch, touched, "touch")
+		GATHER(cpuunmap, cpuunmapped, "unmap")
 		GATHER(release, released, "free")
 		for (i = 0; i < threads; i++)
 			failed += workers[i].failed;
