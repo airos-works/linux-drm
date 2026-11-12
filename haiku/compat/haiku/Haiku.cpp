@@ -22,6 +22,7 @@
 #include <frame_buffer_console.h>
 #include <kernel.h>
 #include <lock.h>
+#include <low_resource_manager.h>
 #include <Notifications.h>
 #include <smp.h>
 #include <team.h>
@@ -1224,6 +1225,68 @@ lx_haiku_pages_free(void* firstPage, unsigned long count)
 }
 
 
+/* Haiku's page of frame \a frame (for lx_haiku_pages_free()) */
+extern "C" void*
+lx_haiku_vm_page(unsigned long frame)
+{
+	return vm_lookup_page(frame);
+}
+
+
+/*	A run of \a count free pages (a power of two, the run aligned to it) at
+	frame \a first or after it and before \a end: its first frame, or 0 if
+	none was found among the next \a budget frames. Looked for without a
+	lock, through Haiku's page array, so the run may be gone already:
+	lx_haiku_pages_alloc_at() checks again. */
+extern "C" unsigned long
+lx_haiku_find_free_run(unsigned long first, unsigned long end,
+	unsigned long count, unsigned long budget)
+{
+	unsigned long frame = (first + count - 1) & ~(count - 1);
+	unsigned long looked = 0;
+	while (frame + count <= end && looked < budget) {
+		unsigned long i;
+		for (i = 0; i < count; i++) {
+			vm_page* page = vm_lookup_page(frame + i);
+			looked++;
+			if (page == NULL)
+				break;
+			uint8 state = page->State();
+			if (state != PAGE_STATE_FREE && state != PAGE_STATE_CLEAR)
+				break;
+		}
+		if (i == count)
+			return frame;
+		// the next aligned run after the page in use
+		frame = (frame + i + count) & ~(count - 1);
+	}
+	return 0;
+}
+
+
+/*	Allocates exactly the \a count pages from frame \a first on, if they are
+	(still) free: Haiku's run allocator then looks at those pages only, with
+	its free page queues locked, instead of searching. */
+extern "C" void*
+lx_haiku_pages_alloc_at(unsigned long first, unsigned long count, int clear,
+	unsigned long long* physical)
+{
+	physical_address_restrictions restrictions = {};
+	restrictions.low_address = (phys_addr_t)first * B_PAGE_SIZE;
+	restrictions.high_address = (phys_addr_t)(first + count) * B_PAGE_SIZE;
+	vm_page* page = vm_page_allocate_page_run(
+		PAGE_STATE_WIRED | (clear ? VM_PAGE_ALLOC_CLEAR : 0), count,
+		&restrictions, VM_PRIORITY_USER);
+	if (page == NULL)
+		return NULL;
+	// see lx_haiku_pages_alloc()
+	for (unsigned long i = 0; i < count; i++)
+		DEBUG_PAGE_ACCESS_END(&page[i]);
+	*physical = (unsigned long long)page->physical_page_number * B_PAGE_SIZE;
+	return page;
+}
+
+
 extern "C" void*
 lx_haiku_page_run_alloc(unsigned long count, unsigned long long alignment,
 	unsigned long long* physical)
@@ -1270,6 +1333,64 @@ extern "C" unsigned long long
 lx_haiku_free_pages(void)
 {
 	return vm_page_num_free_pages();
+}
+
+
+extern "C" unsigned long long
+lx_haiku_unused_pages(void)
+{
+	return vm_page_num_unused_pages();
+}
+
+
+/*	The page pool's lock (compat/src/mm.c): a spinlock, not a Linux one
+	(those are Haiku mutexes here, and a pool's taker and its worker
+	waiting on each other through a mutex cost a thread switch a page).
+	Only list operations run under it. */
+static spinlock sPagePoolLock = B_SPINLOCK_INITIALIZER;
+
+
+extern "C" unsigned long
+lx_haiku_page_pool_lock(void)
+{
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sPagePoolLock);
+	return state;
+}
+
+
+extern "C" void
+lx_haiku_page_pool_unlock(unsigned long state)
+{
+	release_spinlock(&sPagePoolLock);
+	restore_interrupts(state);
+}
+
+
+static void (*sLowMemoryHook)(int level);
+
+
+static void
+low_memory_handler(void* /*data*/, uint32 /*resources*/, int32 level)
+{
+	void (*hook)(int) = sLowMemoryHook;
+	if (hook != NULL && level != B_NO_LOW_RESOURCE)
+		hook(level);
+}
+
+
+extern "C" void
+lx_haiku_low_memory_hook(void (*hook)(int level))
+{
+	if (hook != NULL) {
+		sLowMemoryHook = hook;
+		register_low_resource_handler(low_memory_handler, NULL,
+			B_KERNEL_RESOURCE_PAGES | B_KERNEL_RESOURCE_MEMORY, 0);
+	} else if (sLowMemoryHook != NULL) {
+		// returns once no call of the handler is running
+		unregister_low_resource_handler(low_memory_handler, NULL);
+		sLowMemoryHook = NULL;
+	}
 }
 
 

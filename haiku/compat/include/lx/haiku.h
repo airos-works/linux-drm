@@ -124,9 +124,26 @@ int lx_haiku_is_area_alloc(const void *address);
 void *lx_haiku_pages_alloc(unsigned long count, unsigned long long max_address,
 	int clear, unsigned long long *physical);
 void lx_haiku_pages_free(void *first_page, unsigned long count);
+/* a free run of count pages (aligned to count) in [first, end), 0 if none
+   among budget frames; unlocked, so allocate it with ..._alloc_at() */
+unsigned long lx_haiku_find_free_run(unsigned long first, unsigned long end,
+	unsigned long count, unsigned long budget);
+void *lx_haiku_pages_alloc_at(unsigned long first, unsigned long count,
+	int clear, unsigned long long *physical);
+void *lx_haiku_vm_page(unsigned long frame);	/* Haiku's page of a frame */
 unsigned long long lx_haiku_total_pages(void);
 unsigned long long lx_haiku_free_pages(void);
 unsigned long long lx_haiku_ram_frames(void);	/* frame numbers below end of RAM */
+unsigned long long lx_haiku_unused_pages(void);	/* free, not reserved */
+/* \a hook is called when Haiku runs low on pages or memory (NULL: no more) */
+void lx_haiku_low_memory_hook(void (*hook)(int level));
+
+/* the pool of freed pages (mm.c): started by a driver that wants it; its
+   lock disables interrupts and spins */
+unsigned long lx_haiku_page_pool_lock(void);
+void lx_haiku_page_pool_unlock(unsigned long state);
+int lx_page_pool_init(void);
+void lx_page_pool_exit(void);
 
 /* physical memory in the kernel address space */
 #define LX_HAIKU_MAP_UC	0

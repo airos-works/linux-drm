@@ -134,6 +134,7 @@ kmalloc_alignment(size_t size)
 /* for the watchdog: what Linux code has allocated and not freed */
 static long lx_kmalloc_live, lx_kmalloc_bytes, lx_pages_live;
 static long lx_runs_refused;	/* high-order runs, see lx_alloc_pages() */
+static int lx_page_pool_stats(char *buffer, int size);
 static LIST_HEAD(lx_kmem_caches);
 static DEFINE_MUTEX(lx_kmem_caches_lock);
 
@@ -497,6 +498,7 @@ lx_mm_stats(char *buffer, int size)
 		__atomic_load_n(&lx_kmalloc_bytes, __ATOMIC_RELAXED) / 1024,
 		__atomic_load_n(&lx_pages_live, __ATOMIC_RELAXED),
 		__atomic_load_n(&lx_runs_refused, __ATOMIC_RELAXED));
+	n += lx_page_pool_stats(buffer + n, size - n);
 	mutex_lock(&lx_kmem_caches_lock);
 	list_for_each_entry(cache, &lx_kmem_caches, entry) {
 		for (i = 0; i < 4; i++) {
@@ -613,48 +615,23 @@ page_init(struct page *page, unsigned long pfn, void *haiku_page,
 }
 
 
-struct page *
-lx_alloc_pages(gfp_t gfp, unsigned int order)
+/*	Describes the frames [pfn, pfn + count), Haiku's pages from \a haiku_page
+	on, as one allocation of order \a order: its array of struct page, NULL
+	if there was no memory for it. */
+static struct page *
+pages_describe(void *haiku_page, unsigned long pfn, unsigned long count,
+	unsigned int order)
 {
-	unsigned long count = 1UL << order, pfn, i;
-	unsigned long long physical;
-	unsigned long long max_address = 0;
-	struct page *pages;
-	void *haiku_page;
+	struct page *pages = kcalloc(count, sizeof(*pages), GFP_KERNEL);
+	unsigned long i;
 
-	/*	Linux asks for high-order runs opportunistically (__GFP_NORETRY:
-		TTM's pool tries 2 MiB, then 1 MiB, ..., down to single pages). Haiku
-		has no buddy allocator: a run is a search through all of its pages
-		from the start, with the free page queues write locked, so every page
-		fault and page allocation in the system waits for it, whether it
-		finds a run or not. It took 2.3 ms for each 1 MiB buffer in GTT on
-		the Framework 13 (jmgasper/haiku#36). These requests fail at once,
-		and the caller takes single pages. Runs it cannot do without (DMA
-		buffers) still search. */
-	if (order > 0 && (gfp & __GFP_NORETRY) != 0) {
-		__atomic_add_fetch(&lx_runs_refused, 1, __ATOMIC_RELAXED);
-		return NULL;
-	}
-
-	if (gfp & (__GFP_DMA32 | __GFP_DMA))
-		max_address = 1ULL << 32;
-	pages = kcalloc(count, sizeof(*pages), GFP_KERNEL);
 	if (pages == NULL)
 		return NULL;
-	haiku_page = lx_haiku_pages_alloc(count, max_address,
-		(gfp & __GFP_ZERO) != 0, &physical);
-	if (haiku_page == NULL) {
-		kfree(pages);
-		return NULL;
-	}
-
-	pfn = physical >> PAGE_SHIFT;
 	for (i = 0; i < count; i++) {
 		struct page **slot = page_slot(pfn + i, true);
 		if (slot == NULL) {
 			while (i-- > 0)
 				WRITE_ONCE(*page_slot(pfn + i, false), NULL);
-			lx_haiku_pages_free(haiku_page, count);
 			kfree(pages);
 			return NULL;
 		}
@@ -665,6 +642,556 @@ lx_alloc_pages(gfp_t gfp, unsigned int order)
 	}
 	pages[0].lx_order = order;
 	pages[0].lx_count = count;
+	return pages;
+}
+
+
+/* gives the \a count pages of an allocation back to Haiku */
+static void
+pages_release(struct page *pages, unsigned long count)
+{
+	unsigned long pfn = page_to_pfn(pages), i;
+	for (i = 0; i < count; i++)
+		WRITE_ONCE(*page_slot(pfn + i, false), NULL);
+	lx_haiku_pages_free(pages->lx_haiku_page, count);
+	kfree(pages);
+}
+
+
+/* #pragma mark - page pool */
+
+/*	Freed pages are kept for the next allocation (airos-works/haiku#110). TTM
+	gives a buffer's pages back one allocation at a time and asks for the
+	next buffer's again: 2 MiB first, then smaller orders, down to single
+	pages. Haiku has no buddy allocator, and its run allocator searches with
+	the free page queues locked (lx_alloc_pages() refuses such searches), so
+	every buffer used to take single pages: per page a reservation, the
+	free page queues' lock, a struct page allocation, its frame table
+	entries and zeroing, and the same again to free it. That was about
+	0.25 us a page each way on the Framework 13 (AI 340), ~70 us to create
+	and ~80 us to free a 1 MiB buffer, and twice that when TTM frees a busy
+	buffer on its worker while the next one is made.
+
+	The pool keeps freed allocations of every order up to 2 MiB
+	(PAGE_POOL_RUN_ORDER) with their struct pages and table entries, and
+	hands them out again: a buffer takes one allocation per 2 MiB, 1 MiB,
+	... instead of one per page, and the GPU maps large ones with large
+	fragments. An order the pool has none of is split off a larger
+	allocation (the upper half of one gets struct pages of its own each
+	time, the lower half keeps the old ones), down from 2 MiB runs. Those
+	the worker collects after TTM asked for allocations the pool did not
+	have: it looks for a free 2 MiB block in Haiku's page array without a
+	lock and then allocates exactly that block, which keeps Haiku's free
+	page queues locked for 512 pages, not for a search. Pieces are not
+	merged again; they go back to Haiku as they are.
+
+	The worker also zeroes what was freed, so that an allocation that wants
+	zeroed pages (every buffer does) usually finds some ready; otherwise
+	they are zeroed on the spot, which still costs less than Haiku's
+	allocator. The pool gives everything back to Haiku when it has not been
+	used for PAGE_POOL_IDLE, when Haiku runs low on pages, when free pages
+	get scarce, and when the driver stops. Allocations with address
+	restrictions (DMA32) do not come from the pool.
+
+	"drmparam haiku_page_pool_mb <n>": the most it keeps (-1: a 32nd of
+	RAM, at most 256 MiB; 0: none). */
+
+static int lx_page_pool_mb = -1;
+module_param_named(haiku_page_pool_mb, lx_page_pool_mb, int, 0644);
+
+#define PAGE_POOL_BATCH		32
+#define PAGE_POOL_IDLE		(10 * HZ)
+#define PAGE_POOL_RUN_ORDER	9
+#define PAGE_POOL_RUN		(1UL << PAGE_POOL_RUN_ORDER)
+#define PAGE_POOL_ORDERS	(PAGE_POOL_RUN_ORDER + 1)
+#define PAGE_POOL_COLLECT	32			/* runs collected at a time, at most */
+#define PAGE_POOL_SCAN		(1UL << 18)	/* frames looked at for one run */
+
+struct page_pool_order {
+	struct list_head clear;		/* zeroed allocations (first pages) */
+	struct list_head dirty;		/* still to be zeroed */
+	long clear_count, dirty_count;
+};
+
+static struct page_pool_order page_pool[PAGE_POOL_ORDERS];
+static long page_pool_pages;				/* in all lists */
+static bool page_pool_running;
+static long page_pool_auto_limit;			/* pages, for -1 */
+static long page_pool_headroom;				/* free pages Haiku keeps */
+static unsigned long page_pool_used;		/* jiffies of the last take/give */
+static long run_pool_wanted;				/* asked for and not there */
+static unsigned long run_pool_cursor;		/* where to look for runs next */
+static long page_pool_hits, page_pool_misses, page_pool_splits;
+static long page_pool_inline_clears, run_pool_collected, run_pool_not_found;
+static long page_pool_returned;
+static struct workqueue_struct *page_pool_wq;
+static struct work_struct page_pool_work;
+static struct delayed_work page_pool_trim_work;
+
+
+/* the most pages the pool may hold now, 0 if it is off */
+static long
+page_pool_limit(void)
+{
+	long megabytes = READ_ONCE(lx_page_pool_mb);
+	if (!READ_ONCE(page_pool_running) || megabytes == 0)
+		return 0;
+	if (megabytes < 0)
+		return page_pool_auto_limit;
+	return megabytes << (20 - PAGE_SHIFT);
+}
+
+
+/* with the pool's lock held */
+static void
+page_pool_add(struct page *pages, unsigned int order, bool dirty)
+{
+	struct page_pool_order *list = &page_pool[order];
+	/* in the pool, pages have no allocation: a second free is caught */
+	pages->lx_count = 0;
+	pages->lx_order = order;
+	if (dirty) {
+		list_add(&pages->lru, &list->dirty);
+		list->dirty_count++;
+	} else {
+		list_add(&pages->lru, &list->clear);
+		list->clear_count++;
+	}
+	page_pool_pages += 1L << order;
+}
+
+
+/* with the pool's lock held: the first allocation of \a order on \a list */
+static struct page *
+page_pool_remove(unsigned int order, bool dirty)
+{
+	struct page_pool_order *list = &page_pool[order];
+	struct page *pages = list_first_entry_or_null(dirty ? &list->dirty
+		: &list->clear, struct page, lru);
+	if (pages == NULL)
+		return NULL;
+	list_del(&pages->lru);
+	if (dirty)
+		list->dirty_count--;
+	else
+		list->clear_count--;
+	page_pool_pages -= 1L << order;
+	return pages;
+}
+
+
+/* the \a count pages from \a pages made like newly allocated ones */
+static void
+page_pool_reuse(struct page *pages, unsigned long count, unsigned int order)
+{
+	unsigned long i;
+	for (i = 0; i < count; i++) {
+		struct page *page = &pages[i];
+		page->flags = 0;
+		page->private = 0;
+		atomic_set(&page->_refcount, 1);
+		atomic_set(&page->_mapcount, 0);
+		page->lx_head = pages;
+		page->mapping = NULL;
+		page->index = 0;
+		INIT_LIST_HEAD(&page->lru);
+	}
+	pages->lx_order = order;
+	pages->lx_count = count;
+}
+
+
+/*	Splits \a pages, an allocation of \a from pages taken from the pool,
+	down to \a to: the upper halves go back into the pool with struct pages
+	of their own, \a pages keeps the lower one. Returns the order \a pages
+	has now (more than \a to if memory for struct pages ran out). */
+static unsigned int
+page_pool_split(struct page *pages, unsigned int from, unsigned int to,
+	bool dirty)
+{
+	while (from > to) {
+		unsigned long half = 1UL << (from - 1);
+		unsigned long pfn = page_to_pfn(pages) + half, state;
+		struct page *upper = pages_describe(lx_haiku_vm_page(pfn), pfn, half,
+			from - 1);
+		if (upper == NULL)
+			break;
+		state = lx_haiku_page_pool_lock();
+		page_pool_add(upper, from - 1, dirty);
+		lx_haiku_page_pool_unlock(state);
+		from--;
+		__atomic_add_fetch(&page_pool_splits, 1, __ATOMIC_RELAXED);
+	}
+	return from;
+}
+
+
+/*	Takes an allocation of \a order from the pool, zeroed if \a zeroed, or
+	splits one off a larger one; NULL if there is none. Single pages are not
+	split off: that would describe up to 511 other pages, at 2 MiB, which
+	costs more than Haiku's allocator does for one page. */
+static struct page *
+page_pool_take(unsigned int order, bool zeroed)
+{
+	struct page *pages = NULL;
+	unsigned long state, count = 1UL << order, i;
+	unsigned int found = order, last, pass;
+	bool dirty = false;
+
+	if (!READ_ONCE(page_pool_running) || order > PAGE_POOL_RUN_ORDER)
+		return NULL;
+	last = order == 0 ? 0 : PAGE_POOL_RUN_ORDER;
+	state = lx_haiku_page_pool_lock();
+	/* what needs no zeroing first; of that, the smallest order that does */
+	for (pass = 0; pages == NULL && pass < 2; pass++) {
+		dirty = zeroed ? pass == 1 : pass == 0;
+		for (found = order; found <= last; found++) {
+			pages = page_pool_remove(found, dirty);
+			if (pages != NULL)
+				break;
+		}
+	}
+	if (pages == NULL && order > 0)
+		run_pool_wanted++;
+	lx_haiku_page_pool_unlock(state);
+
+	if (pages == NULL) {
+		__atomic_add_fetch(&page_pool_misses, 1, __ATOMIC_RELAXED);
+		if (order > 0)
+			queue_work(page_pool_wq, &page_pool_work);
+		return NULL;
+	}
+	WRITE_ONCE(page_pool_used, jiffies);
+	__atomic_add_fetch(&page_pool_hits, 1, __ATOMIC_RELAXED);
+	if (found > order) {
+		found = page_pool_split(pages, found, order, dirty);
+		if (found != order) {
+			/* no memory to describe the pieces: back with the rest */
+			state = lx_haiku_page_pool_lock();
+			page_pool_add(pages, found, dirty);
+			lx_haiku_page_pool_unlock(state);
+			return NULL;
+		}
+	}
+	if (zeroed && dirty) {
+		for (i = 0; i < count; i++)
+			clear_page(page_address(&pages[i]));
+		__atomic_add_fetch(&page_pool_inline_clears, count, __ATOMIC_RELAXED);
+	}
+	page_pool_reuse(pages, count, order);
+	return pages;
+}
+
+
+/* keeps a freed allocation, if the pool has room for it */
+static bool
+page_pool_give(struct page *pages, unsigned long count)
+{
+	unsigned int order = pages->lx_order;
+	long limit = page_pool_limit();
+	unsigned long state;
+	bool kick;
+
+	if (limit == 0 || order > PAGE_POOL_RUN_ORDER || count != 1UL << order
+		|| (long)lx_haiku_unused_pages() < page_pool_headroom)
+		return false;
+	state = lx_haiku_page_pool_lock();
+	if (page_pool_pages + (long)count > limit) {
+		lx_haiku_page_pool_unlock(state);
+		return false;
+	}
+	kick = page_pool[order].dirty_count == 0;
+	page_pool_add(pages, order, true);
+	lx_haiku_page_pool_unlock(state);
+	WRITE_ONCE(page_pool_used, jiffies);
+
+	/* a worker that runs takes what is freed meanwhile as well */
+	if (kick)
+		queue_work(page_pool_wq, &page_pool_work);
+	return true;
+}
+
+
+/* gives pages back to Haiku until the pool holds no more than \a keep */
+static void
+page_pool_shrink(long keep)
+{
+	for (;;) {
+		struct page *batch[PAGE_POOL_BATCH];
+		unsigned int orders[PAGE_POOL_BATCH];
+		unsigned long state;
+		long released = 0;
+		int count = 0, i;
+
+		state = lx_haiku_page_pool_lock();
+		while (count < PAGE_POOL_BATCH && page_pool_pages > keep) {
+			struct page *pages = NULL;
+			int order;
+			/* large ones first, what is not zeroed yet first */
+			for (order = PAGE_POOL_RUN_ORDER; pages == NULL && order >= 0;
+					order--) {
+				pages = page_pool_remove(order, true);
+				if (pages == NULL)
+					pages = page_pool_remove(order, false);
+				if (pages != NULL)
+					orders[count] = order;
+			}
+			batch[count++] = pages;
+		}
+		lx_haiku_page_pool_unlock(state);
+		if (count == 0)
+			break;
+
+		for (i = 0; i < count; i++) {
+			pages_release(batch[i], 1UL << orders[i]);
+			released += 1L << orders[i];
+		}
+		__atomic_add_fetch(&page_pool_returned, released, __ATOMIC_RELAXED);
+	}
+}
+
+
+/*	Finds a free 2 MiB block, allocates it from Haiku, zeroed, and puts it
+	into the pool; false if there was none, or no room for it. */
+static bool
+run_pool_collect(void)
+{
+	unsigned long frames = page_frames, start = READ_ONCE(run_pool_cursor);
+	unsigned long long physical;
+	unsigned long pfn, state;
+	struct page *pages;
+	void *haiku_page;
+	bool room;
+
+	if (frames == 0 || (long)lx_haiku_unused_pages()
+			< page_pool_headroom + (long)PAGE_POOL_RUN)
+		return false;
+	state = lx_haiku_page_pool_lock();
+	room = page_pool_pages + (long)PAGE_POOL_RUN <= page_pool_limit();
+	lx_haiku_page_pool_unlock(state);
+	if (!room)
+		return false;
+
+	if (start >= frames)
+		start = 0;
+	pfn = lx_haiku_find_free_run(start, frames, PAGE_POOL_RUN, PAGE_POOL_SCAN);
+	if (pfn == 0 && start > 0)
+		pfn = lx_haiku_find_free_run(0, start, PAGE_POOL_RUN, PAGE_POOL_SCAN);
+	if (pfn == 0) {
+		__atomic_add_fetch(&run_pool_not_found, 1, __ATOMIC_RELAXED);
+		return false;
+	}
+	WRITE_ONCE(run_pool_cursor, pfn + PAGE_POOL_RUN);
+	haiku_page = lx_haiku_pages_alloc_at(pfn, PAGE_POOL_RUN, true, &physical);
+	if (haiku_page == NULL) {
+		/* taken meanwhile */
+		__atomic_add_fetch(&run_pool_not_found, 1, __ATOMIC_RELAXED);
+		return false;
+	}
+	pages = pages_describe(haiku_page, physical >> PAGE_SHIFT, PAGE_POOL_RUN,
+		PAGE_POOL_RUN_ORDER);
+	if (pages == NULL) {
+		lx_haiku_pages_free(haiku_page, PAGE_POOL_RUN);
+		return false;
+	}
+	state = lx_haiku_page_pool_lock();
+	page_pool_add(pages, PAGE_POOL_RUN_ORDER, false);
+	lx_haiku_page_pool_unlock(state);
+	__atomic_add_fetch(&run_pool_collected, 1, __ATOMIC_RELAXED);
+	return true;
+}
+
+
+/*	The worker: zeroes what was freed, and collects the runs that were
+	asked for. */
+static void
+page_pool_work_fn(struct work_struct *work)
+{
+	unsigned int order;
+	long wanted;
+
+	for (order = 0; order < PAGE_POOL_ORDERS; order++) {
+		for (;;) {
+			struct page *batch[PAGE_POOL_BATCH];
+			unsigned long state, count = 1UL << order, i;
+			int taken = 0, j;
+
+			/* single pages a batch at a time, larger ones one by one */
+			state = lx_haiku_page_pool_lock();
+			while (taken < (order == 0 ? PAGE_POOL_BATCH : 1)
+				&& (batch[taken] = page_pool_remove(order, true)) != NULL)
+				taken++;
+			lx_haiku_page_pool_unlock(state);
+			if (taken == 0)
+				break;
+
+			for (j = 0; j < taken; j++) {
+				for (i = 0; i < count; i++)
+					clear_page(page_address(&batch[j][i]));
+			}
+
+			state = lx_haiku_page_pool_lock();
+			for (j = 0; j < taken; j++)
+				page_pool_add(batch[j], order, false);
+			lx_haiku_page_pool_unlock(state);
+		}
+	}
+
+	{
+		unsigned long state = lx_haiku_page_pool_lock();
+		wanted = min_t(long, run_pool_wanted, PAGE_POOL_COLLECT);
+		run_pool_wanted = 0;
+		lx_haiku_page_pool_unlock(state);
+	}
+	while (wanted-- > 0 && run_pool_collect())
+		;
+
+	queue_delayed_work(page_pool_wq, &page_pool_trim_work, HZ);
+}
+
+
+/* the worker, every second while the pool holds pages */
+static void
+page_pool_trim(struct work_struct *work)
+{
+	long keep = page_pool_limit();
+
+	if (time_after(jiffies, READ_ONCE(page_pool_used) + PAGE_POOL_IDLE)
+		|| (long)lx_haiku_unused_pages() < page_pool_headroom)
+		keep = 0;
+	page_pool_shrink(keep);
+
+	if (READ_ONCE(page_pool_pages) != 0)
+		queue_delayed_work(page_pool_wq, &page_pool_trim_work, HZ);
+}
+
+
+/* Haiku's low resource manager: free pages or memory are getting scarce */
+static void
+page_pool_low_memory(int level)
+{
+	page_pool_shrink(0);
+}
+
+
+static int
+lx_page_pool_stats(char *buffer, int size)
+{
+	int n = scnprintf(buffer, size, " pool %ld pages (by order, zeroed+not:",
+		READ_ONCE(page_pool_pages));
+	unsigned int order;
+	for (order = 0; order < PAGE_POOL_ORDERS; order++) {
+		long clear = READ_ONCE(page_pool[order].clear_count);
+		long dirty = READ_ONCE(page_pool[order].dirty_count);
+		if (clear + dirty > 0)
+			n += scnprintf(buffer + n, size - n, " %u:%ld+%ld", order, clear,
+				dirty);
+	}
+	n += scnprintf(buffer + n, size - n, ") hits %ld misses %ld splits %ld, "
+		"zeroed on use %ld, runs collected %ld not found %ld, returned %ld",
+		__atomic_load_n(&page_pool_hits, __ATOMIC_RELAXED),
+		__atomic_load_n(&page_pool_misses, __ATOMIC_RELAXED),
+		__atomic_load_n(&page_pool_splits, __ATOMIC_RELAXED),
+		__atomic_load_n(&page_pool_inline_clears, __ATOMIC_RELAXED),
+		__atomic_load_n(&run_pool_collected, __ATOMIC_RELAXED),
+		__atomic_load_n(&run_pool_not_found, __ATOMIC_RELAXED),
+		__atomic_load_n(&page_pool_returned, __ATOMIC_RELAXED));
+	return n;
+}
+
+
+/*	Starts the pool (after lx_workqueue_init()); a driver that does not
+	frees its pages without it. */
+int
+lx_page_pool_init(void)
+{
+	long total = (long)lx_haiku_total_pages();
+	unsigned int order;
+
+	if (page_directory_get() == NULL)
+		return -ENOMEM;
+	page_pool_wq = alloc_workqueue("linux page pool", WQ_UNBOUND, 1);
+	if (page_pool_wq == NULL)
+		return -ENOMEM;
+	for (order = 0; order < PAGE_POOL_ORDERS; order++) {
+		INIT_LIST_HEAD(&page_pool[order].clear);
+		INIT_LIST_HEAD(&page_pool[order].dirty);
+	}
+	INIT_WORK(&page_pool_work, page_pool_work_fn);
+	INIT_DELAYED_WORK(&page_pool_trim_work, page_pool_trim);
+	page_pool_auto_limit = min(total / 32, 256L << (20 - PAGE_SHIFT));
+	page_pool_headroom = max(total / 32, 64L << (20 - PAGE_SHIFT));
+	/* runs are looked for from the upper half of RAM up, where fewer
+	   long-lived allocations are */
+	run_pool_cursor = page_frames / 2;
+	lx_haiku_low_memory_hook(page_pool_low_memory);
+	WRITE_ONCE(page_pool_running, true);
+	return 0;
+}
+
+
+/*	Stops the pool and gives all of its pages back (before
+	lx_workqueue_exit(), with no pages being freed any more). */
+void
+lx_page_pool_exit(void)
+{
+	if (page_pool_wq == NULL)
+		return;
+	WRITE_ONCE(page_pool_running, false);
+	lx_haiku_low_memory_hook(NULL);
+	cancel_work_sync(&page_pool_work);
+	cancel_delayed_work_sync(&page_pool_trim_work);
+	destroy_workqueue(page_pool_wq);
+	page_pool_wq = NULL;
+	page_pool_shrink(0);
+}
+
+
+/* #pragma mark - allocating pages */
+
+
+struct page *
+lx_alloc_pages(gfp_t gfp, unsigned int order)
+{
+	unsigned long count = 1UL << order;
+	unsigned long long physical;
+	unsigned long long max_address = 0;
+	bool zeroed = (gfp & __GFP_ZERO) != 0;
+	struct page *pages;
+	void *haiku_page;
+
+	if (gfp & (__GFP_DMA32 | __GFP_DMA))
+		max_address = 1ULL << 32;
+	else {
+		pages = page_pool_take(order, zeroed);
+		if (pages != NULL) {
+			__atomic_add_fetch(&lx_pages_live, (long)count, __ATOMIC_RELAXED);
+			return pages;
+		}
+	}
+
+	/*	Linux asks for high-order runs opportunistically (__GFP_NORETRY:
+		TTM's pool tries 2 MiB, then 1 MiB, ..., down to single pages). Haiku
+		has no buddy allocator: a run is a search through all of its pages
+		from the start, with the free page queues write locked, so every page
+		fault and page allocation in the system waits for it, whether it
+		finds a run or not. It took 2.3 ms for each 1 MiB buffer in GTT on
+		the Framework 13 (jmgasper/haiku#36). These requests fail at once
+		when the pool has nothing for them, and the caller tries a smaller
+		order. Runs it cannot do without (DMA buffers) still search. */
+	if (order > 0 && (gfp & __GFP_NORETRY) != 0) {
+		__atomic_add_fetch(&lx_runs_refused, 1, __ATOMIC_RELAXED);
+		return NULL;
+	}
+
+	haiku_page = lx_haiku_pages_alloc(count, max_address, zeroed, &physical);
+	if (haiku_page == NULL)
+		return NULL;
+	pages = pages_describe(haiku_page, physical >> PAGE_SHIFT, count, order);
+	if (pages == NULL) {
+		lx_haiku_pages_free(haiku_page, count);
+		return NULL;
+	}
 	__atomic_add_fetch(&lx_pages_live, (long)count, __ATOMIC_RELAXED);
 	return pages;
 }
@@ -673,7 +1200,7 @@ lx_alloc_pages(gfp_t gfp, unsigned int order)
 void
 lx_free_pages(struct page *page, unsigned int order)
 {
-	unsigned long pfn, count, i;
+	unsigned long pfn, count;
 	struct page **slot;
 
 	if (page == NULL)
@@ -686,11 +1213,14 @@ lx_free_pages(struct page *page, unsigned int order)
 		return;
 	}
 	count = page->lx_count;
-	for (i = 0; i < count; i++)
-		WRITE_ONCE(*page_slot(pfn + i, false), NULL);
+	if (count == 0) {
+		WARN(1, "freeing pages twice (pfn %lx)\n", pfn);
+		return;
+	}
 	__atomic_sub_fetch(&lx_pages_live, (long)count, __ATOMIC_RELAXED);
-	lx_haiku_pages_free(page->lx_haiku_page, count);
-	kfree(page);
+	if (page_pool_give(page, count))
+		return;
+	pages_release(page, count);
 }
 
 
