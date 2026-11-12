@@ -105,6 +105,10 @@ drm_devices(struct drm_device **devices, int max)
 
 static int haiku_console_test;
 static int haiku_lab_shutdown;
+/* "drmparam haiku_mm_report 1": the watchdog's memory line, once (kmalloc,
+   pages, the page pool) */
+static int haiku_mm_report;
+module_param(haiku_mm_report, int, 0644);
 static void lx_glue_console_test(void);
 static void lx_glue_watchdog_start(void);
 static void lx_glue_fence_report(void);
@@ -158,6 +162,12 @@ lx_glue_set_param(const char *name, const char *value)
 		if (error == 0 && strcmp(name, "haiku_lab_shutdown") == 0
 			&& haiku_lab_shutdown)
 			lx_glue_shutdown();
+		if (error == 0 && strcmp(name, "haiku_mm_report") == 0
+			&& haiku_mm_report) {
+			char line[400];
+			lx_mm_stats(line, sizeof(line));
+			pr_info("amdgpu: memory: %s\n", line);
+		}
 		return error;
 	}
 	pr_info("amdgpu: no parameter %s\n", name);
@@ -181,6 +191,9 @@ lx_glue_init(void)
 	error = lx_workqueue_init();
 	if (error != 0)
 		return error;
+	/* without it, pages are freed to Haiku at once */
+	if (lx_page_pool_init() != 0)
+		pr_warn("amdgpu_drm: no page pool\n");
 
 	/* dma-buf needs a pseudo file system Haiku does not have: exporting
 	   buffers fails, the rest works */
@@ -213,6 +226,7 @@ err_buddy:
 err_drm:
 	lx_module_exit_drm_core_exit();
 err_workqueues:
+	lx_page_pool_exit();
 	lx_workqueue_exit();
 	return error;
 }
@@ -559,7 +573,8 @@ lx_glue_uninit(void)
 	lx_module_exit_drm_display_helper_module_exit();
 	lx_module_exit_gpu_buddy_module_exit();
 	lx_module_exit_drm_core_exit();
-	pr_info("amdgpu_drm: stopping: workqueues, RCU, timers\n");
+	pr_info("amdgpu_drm: stopping: page pool, workqueues, RCU, timers\n");
+	lx_page_pool_exit();
 	lx_workqueue_exit();
 	lx_rcu_exit();
 	lx_timer_exit();
@@ -1766,6 +1781,117 @@ lx_glue_selftest(void)
 		pr_info("amdgpu selftest: 256 pages allocated in %llu us, freed in "
 			"%llu us\n", (allocated - start) / 1000, (freed - allocated) / 1000);
 		kfree(single);
+	}
+	{
+		/* the page pool: freed pages written all over come back zeroed,
+		   right away (zeroed on the spot) and after the worker ran */
+		struct page **single = kcalloc(256, sizeof(*single), GFP_KERNEL);
+		int round;
+		for (round = 0; single != NULL && round < 3; round++) {
+			u64 start = ktime_get_ns(), allocated, freed;
+			bool zeroed = true, found = true;
+			int j;
+			for (i = 0; i < 256; i++) {
+				single[i] = alloc_page(GFP_HIGHUSER | __GFP_ZERO);
+				if (single[i] == NULL
+					|| pfn_to_page(page_to_pfn(single[i])) != single[i]
+					|| page_count(single[i]) != 1)
+					found = false;
+			}
+			allocated = ktime_get_ns();
+			for (i = 0; i < 256 && single[i] != NULL; i++) {
+				u64 *words = page_address(single[i]);
+				for (j = 0; j < PAGE_SIZE / 8; j++)
+					zeroed &= words[j] == 0;
+				memset(words, 0xa5, PAGE_SIZE);
+			}
+			start += ktime_get_ns() - allocated;
+			allocated = ktime_get_ns();
+			for (i = 0; i < 256; i++) {
+				if (single[i] != NULL)
+					__free_page(single[i]);
+			}
+			freed = ktime_get_ns();
+			SELFTEST(found && zeroed, round == 0 ? "pool: pages come back zeroed"
+				: round == 1 ? "pool: pages written and freed come back zeroed "
+					"(right after)"
+				: "pool: pages written and freed come back zeroed (worker)");
+			pr_info("amdgpu selftest: pool round %d: 256 pages allocated in "
+				"%llu us, freed in %llu us\n", round,
+				(allocated - start) / 1000, (freed - allocated) / 1000);
+			if (round > 0)
+				msleep(100);
+		}
+		kfree(single);
+	}
+	{
+		/* 2 MiB runs, as TTM asks for them: the pool has none at first and
+		   collects some; one written all over comes back zeroed, right
+		   away and after the worker ran */
+		const gfp_t gfp = GFP_HIGHUSER | __GFP_ZERO | __GFP_NORETRY
+			| __GFP_NOWARN;
+		struct page *run = alloc_pages(gfp, 9);
+		int round;
+		if (run != NULL)
+			__free_pages(run, 9);
+		msleep(300);
+		for (round = 0; round < 3; round++) {
+			u64 start = ktime_get_ns(), taken;
+			bool zeroed = true, found;
+			run = alloc_pages(gfp, 9);
+			taken = ktime_get_ns() - start;
+			found = run != NULL && (page_to_pfn(run) & 511) == 0
+				&& pfn_to_page(page_to_pfn(run) + 511) == run + 511
+				&& page_count(run) == 1;
+			if (run != NULL) {
+				for (i = 0; i < 512; i++) {
+					u64 *words = page_address(run + i);
+					int j;
+					for (j = 0; j < PAGE_SIZE / 8; j++)
+						zeroed &= words[j] == 0;
+					memset(words, 0xa5, PAGE_SIZE);
+				}
+				start = ktime_get_ns();
+				__free_pages(run, 9);
+				pr_info("amdgpu selftest: run round %d: taken in %llu us, freed "
+					"in %llu us\n", round, taken / 1000,
+					(ktime_get_ns() - start) / 1000);
+			}
+			SELFTEST(found && zeroed, round == 0
+				? "pool: a 2 MiB run collected, aligned, zeroed"
+				: round == 1 ? "pool: a run written and freed comes back zeroed "
+					"(right after)"
+				: "pool: a run written and freed comes back zeroed (worker)");
+			if (round > 0)
+				msleep(100);
+		}
+		{
+			/* pieces split off a run: aligned, zeroed, their own */
+			struct page *eight = alloc_pages(gfp, 8);
+			struct page *four = alloc_pages(gfp, 4);
+			bool zeroed = true, found = eight != NULL && four != NULL
+				&& (page_to_pfn(eight) & 255) == 0
+				&& (page_to_pfn(four) & 15) == 0
+				&& pfn_to_page(page_to_pfn(eight) + 255) == eight + 255
+				&& pfn_to_page(page_to_pfn(four) + 15) == four + 15;
+			for (i = 0; found && i < 256; i++) {
+				u64 *words = page_address(eight + i);
+				int j;
+				for (j = 0; j < PAGE_SIZE / 8; j++)
+					zeroed &= words[j] == 0;
+			}
+			SELFTEST(found && zeroed,
+				"pool: 1 MiB and 64 KiB pieces of a run, aligned and zeroed");
+			if (eight != NULL)
+				__free_pages(eight, 8);
+			if (four != NULL)
+				__free_pages(four, 4);
+		}
+		{
+			char line[400];
+			lx_mm_stats(line, sizeof(line));
+			pr_info("amdgpu selftest: %s\n", line);
+		}
 	}
 
 	xa_init_flags(&xa, XA_FLAGS_ALLOC1);
