@@ -264,6 +264,7 @@ public:
 
 			status_t			Init(page_num_t pageCount);
 			void				SetMapping(void* mapping);
+			void				SetMappedUpTo(page_num_t end);
 
 	virtual	status_t			Fault(VMAddressSpace* addressSpace,
 									off_t offset);
@@ -287,11 +288,18 @@ private:
 				// changes whenever pages are unmapped
 			int32				fFaulting;
 			ConditionVariable	fFaultsDone;
+			page_num_t			fFaultEnd;
+				// where the pages the last fault mapped end
+			page_num_t			fFaultWindow;
+				// how many pages the last fault mapped
 };
 
 
 static const page_num_t kFaultPages = 64;
-	// pages mapped at once: the one touched and the ones after it
+	// pages mapped at once: the one touched and the ones after it, and
+	// pages the glue looks up at a time
+static const page_num_t kMaxFaultPages = 512;
+	// ... up to as many when a team goes through a buffer in order
 
 
 static uint32
@@ -313,7 +321,9 @@ BufferCache::BufferCache()
 	fMapping(NULL),
 	fPageCount(0),
 	fGeneration(0),
-	fFaulting(0)
+	fFaulting(0),
+	fFaultEnd(0),
+	fFaultWindow(kFaultPages)
 {
 }
 
@@ -339,6 +349,18 @@ BufferCache::SetMapping(void* mapping)
 }
 
 
+/*!	The pages [0, end) were mapped when the area was made: a fault at \a end
+	continues them (see Fault()).
+*/
+void
+BufferCache::SetMappedUpTo(page_num_t end)
+{
+	AutoLocker<VMCache> locker(this);
+	fFaultEnd = end;
+	fFaultWindow = kFaultPages;
+}
+
+
 status_t
 BufferCache::Fault(VMAddressSpace* addressSpace, off_t offset)
 {
@@ -346,9 +368,18 @@ BufferCache::Fault(VMAddressSpace* addressSpace, off_t offset)
 	if (page >= fPageCount)
 		return B_BAD_ADDRESS;
 
+	// The page touched and the ones after it; twice as many as last time
+	// when the team goes on where the last fault's pages end (a buffer
+	// written or read from start to end), up to kMaxFaultPages.
+	page_num_t window = kFaultPages;
+	if (page == fFaultEnd)
+		window = min_c(fFaultWindow * 2, kMaxFaultPages);
+	page_num_t end = min_c(page + window, fPageCount);
+	fFaultWindow = window;
+	fFaultEnd = end;
+
 	Unlock();
-	status_t status = FaultIn(addressSpace, page,
-		min_c(page + kFaultPages, fPageCount));
+	status_t status = FaultIn(addressSpace, page, end);
 	Lock();
 	return status;
 }
@@ -631,12 +662,19 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 		return status;
 	}
 
-	// map it all now; what moves later faults in again. A buffer the CPU
-	// cannot reach fails here, as before, not at the team's first access.
+	// Map the start of the buffer now, the rest when the team first touches
+	// it (Fault()); what moves later faults in again. Mapping the start runs
+	// the buffer's fault handler, which moves a buffer the CPU cannot reach
+	// to where it can or fails: here, as before, not at the team's first
+	// access. Not while the GPU still clears or moves the buffer, though:
+	// that is not waited for (see lx_glue_map_prefault()).
+	page_num_t prefault = min_c(
+		(page_num_t)lx_glue_map_prefault(mapping, pageCount), pageCount);
+	cache->SetMappedUpTo(prefault);
 	addressSpace->ReadLock();
-	if (addressSpace->LookupArea((addr_t)address) == area
+	if (prefault > 0 && addressSpace->LookupArea((addr_t)address) == area
 		&& area->id == areaID) {
-		status = cache->FaultIn(addressSpace, 0, pageCount);
+		status = cache->FaultIn(addressSpace, 0, prefault);
 	}
 	addressSpace->ReadUnlock();
 	addressSpace->Put();

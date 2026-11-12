@@ -1596,6 +1596,33 @@ lx_glue_map_fault(void *_mapping, unsigned long first, unsigned long *pfns,
 }
 
 
+/*	How many pages at the start of a new mapping DRM_HAIKU_IOCTL_MAP maps
+	right away, of \a count; the rest fault in when the team first touches
+	them, as on Linux, where mmap() maps nothing (airos-works/haiku#110:
+	mapping all of a buffer at once cost ~0.27 us a page, used or not).
+	None while the GPU still clears or moves the buffer (a kernel fence,
+	which the fault handler would wait for). "drmparam haiku_map_prefault
+	-1" maps whole buffers again. */
+static int haiku_map_prefault = 16;
+module_param(haiku_map_prefault, int, 0644);
+
+unsigned long
+lx_glue_map_prefault(void *_mapping, unsigned long count)
+{
+	struct lx_mapping *mapping = _mapping;
+	/* drm_gem_mmap()'s object, or the TTM buffer that starts with it */
+	struct drm_gem_object *object = mapping->vma.vm_private_data;
+	int prefault = READ_ONCE(haiku_map_prefault);
+
+	if (prefault < 0)
+		return count;
+	if (object != NULL && object->resv != NULL
+		&& !dma_resv_test_signaled(object->resv, DMA_RESV_USAGE_KERNEL))
+		return 0;
+	return min_t(unsigned long, prefault, count);
+}
+
+
 /*	Ends the calls to the mapping's invalidate function: when this returns,
 	none is running or will be. */
 void

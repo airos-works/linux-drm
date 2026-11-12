@@ -55,6 +55,7 @@ void *lx_glue_map(void *file, unsigned long long offset, unsigned long size,
 		unsigned long count), void *owner);
 long lx_glue_map_fault(void *mapping, unsigned long first, unsigned long *pfns,
 	unsigned long max, int *caching);
+unsigned long lx_glue_map_prefault(void *mapping, unsigned long count);
 void lx_glue_map_detach(void *mapping);
 void lx_glue_unmap(void *mapping);
 int lx_glue_is_error(const void *pointer);
