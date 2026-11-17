@@ -124,11 +124,26 @@ init_wait_entry(struct wait_queue_entry *wq_entry, int flags)
 }
 
 
+/*	As on Linux, a signal ends an interruptible (or, a fatal one, a killable)
+	wait_event*() here, before the next sleep: the sleep itself returns at
+	once while a signal is pending, so without this the wait went round
+	until its condition came true or its time ran out - and its time does
+	not run out, since schedule_timeout() rounds what is left up to whole
+	jiffies. A thread killed in DRM_HAIKU_IOCTL_WAIT_HOTPLUG (app_server's
+	hot plug thread) spun in the kernel for good, and its team never died
+	(haiku#134). */
 long
 prepare_to_wait_event(struct wait_queue_head *wq_head,
 	struct wait_queue_entry *wq_entry, int state)
 {
 	spin_lock(&wq_head->lock);
+	if (signal_pending_state(state, current)) {
+		/* an exclusive waiter that a wake up chose and that leaves now
+		 * finds its condition true in ___wait_event() and consumes it */
+		list_del_init(&wq_entry->entry);
+		spin_unlock(&wq_head->lock);
+		return -ERESTARTSYS;
+	}
 	if (list_empty(&wq_entry->entry)) {
 		if (wq_entry->flags & WQ_FLAG_EXCLUSIVE)
 			__add_wait_queue_entry_tail(wq_head, wq_entry);
@@ -276,6 +291,12 @@ do_wait_for_common(struct completion *x, long timeout, int state)
 		wait.flags |= WQ_FLAG_EXCLUSIVE;
 		__add_wait_queue_entry_tail(&x->wait, &wait);
 		do {
+			/* a signal ends an interruptible or killable wait, as on
+			 * Linux (see prepare_to_wait_event()) */
+			if (signal_pending_state(state, current)) {
+				timeout = -ERESTARTSYS;
+				break;
+			}
 			__set_current_state(state);
 			spin_unlock(&x->wait.lock);
 			timeout = schedule_timeout(timeout);
@@ -318,8 +339,8 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 int
 wait_for_completion_interruptible(struct completion *x)
 {
-	wait_for_common(x, MAX_SCHEDULE_TIMEOUT, TASK_INTERRUPTIBLE);
-	return 0;
+	long t = wait_for_common(x, MAX_SCHEDULE_TIMEOUT, TASK_INTERRUPTIBLE);
+	return t == -ERESTARTSYS ? (int)t : 0;
 }
 
 
@@ -328,6 +349,22 @@ wait_for_completion_interruptible_timeout(struct completion *x,
 	unsigned long timeout)
 {
 	return wait_for_common(x, timeout, TASK_INTERRUPTIBLE);
+}
+
+
+int
+wait_for_completion_killable(struct completion *x)
+{
+	long t = wait_for_common(x, MAX_SCHEDULE_TIMEOUT, TASK_KILLABLE);
+	return t == -ERESTARTSYS ? (int)t : 0;
+}
+
+
+long
+wait_for_completion_killable_timeout(struct completion *x,
+	unsigned long timeout)
+{
+	return wait_for_common(x, timeout, TASK_KILLABLE);
 }
 
 

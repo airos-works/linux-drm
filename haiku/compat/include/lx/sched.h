@@ -365,10 +365,21 @@ do { \
 		__ret = __wait_event_interruptible_timeout(wq_head, condition, timeout); \
 	__ret; \
 })
-#define wait_event_killable(wq_head, condition) \
-	wait_event_interruptible(wq_head, condition)
-#define wait_event_killable_timeout(wq_head, condition, timeout) \
-	wait_event_interruptible_timeout(wq_head, condition, timeout)
+/* killable: only a fatal signal ends them (prepare_to_wait_event()) */
+#define wait_event_killable(wq_head, condition) ({ \
+	int __ret = 0; \
+	if (!(condition)) \
+		__ret = ___wait_event(wq_head, condition, TASK_KILLABLE, 0, 0, \
+			schedule()); \
+	__ret; \
+})
+#define wait_event_killable_timeout(wq_head, condition, timeout) ({ \
+	long __ret = timeout; \
+	if (!___wait_cond_timeout(condition)) \
+		__ret = ___wait_event(wq_head, ___wait_cond_timeout(condition), \
+			TASK_KILLABLE, 0, timeout, __ret = schedule_timeout(__ret)); \
+	__ret; \
+})
 #define wait_event_idle(wq_head, condition)	wait_event(wq_head, condition)
 #define wait_event_idle_timeout(wq_head, condition, timeout) \
 	wait_event_timeout(wq_head, condition, timeout)
@@ -439,9 +450,9 @@ unsigned long wait_for_completion_timeout(struct completion *x,
 int wait_for_completion_interruptible(struct completion *x);
 long wait_for_completion_interruptible_timeout(struct completion *x,
 	unsigned long timeout);
-#define wait_for_completion_killable(x)	wait_for_completion_interruptible(x)
-#define wait_for_completion_killable_timeout(x, t) \
-	wait_for_completion_interruptible_timeout(x, t)
+int wait_for_completion_killable(struct completion *x);
+long wait_for_completion_killable_timeout(struct completion *x,
+	unsigned long timeout);
 #define wait_for_completion_io(x)	wait_for_completion(x)
 #define wait_for_completion_io_timeout(x, t)	wait_for_completion_timeout(x, t)
 bool try_wait_for_completion(struct completion *x);
