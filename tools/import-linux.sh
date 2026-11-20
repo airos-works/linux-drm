@@ -19,6 +19,11 @@ cd "$SRC"
 	# compute accelerator nodes (for the AMD NPU driver, which
 	# tools/import-amdxdna.sh imports from a newer Linux)
 	echo drivers/accel/drm_accel.c
+	# Intel's i915 (without its self tests and GVT), the Intel DRM headers
+	find drivers/gpu/drm/i915 -type f \( -name '*.[ch]' -o -name 'Makefile' \) \
+		-not -path '*/selftests/*' -not -path '*/gvt/*'
+	find drivers/gpu/drm/i915 -type f -path '*/selftests/*.h'
+	ls include/drm/intel/*.h include/video/mipi_display.h include/linux/ref_tracker.h drivers/platform/x86/intel_ips.h
 	# fences, reservation objects, dma-buf and sync files
 	find drivers/dma-buf -maxdepth 1 -type f -name '*.[ch]'
 	# DRM headers, their UAPI, and the Linux headers of the subsystems above

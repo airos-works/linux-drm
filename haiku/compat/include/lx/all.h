@@ -33,5 +33,6 @@
 #include <lx/misc.h>
 #include <lx/accel.h>
 #include <lx/nouveau.h>
+#include <lx/i915.h>
 
 #endif /* _LX_ALL_H */

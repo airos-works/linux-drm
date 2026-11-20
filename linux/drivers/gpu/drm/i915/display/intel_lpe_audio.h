@@ -12,7 +12,8 @@ enum port;
 enum transcoder;
 struct intel_display;
 
-#ifdef I915
+/* Haiku: no LPE audio (Valleyview and Cherryview HDMI audio) */
+#if defined(I915) && !defined(__HAIKU_LINUX_COMPAT__)
 int  intel_lpe_audio_init(struct intel_display *display);
 void intel_lpe_audio_teardown(struct intel_display *display);
 void intel_lpe_audio_irq_handler(struct intel_display *display);

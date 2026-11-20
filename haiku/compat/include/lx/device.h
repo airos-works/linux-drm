@@ -93,6 +93,7 @@ struct lx_param {
 #define module_param_string(name, string, len, perm)
 #define module_param_array(name, type, nump, perm)
 #define module_param_array_named(name, array, type, nump, perm)
+#define module_param_cb_unsafe(name, ops, arg, perm)
 #define module_param_cb(name, ops, arg, perm)
 #define module_param_call(name, set, get, arg, perm)
 #define core_param(name, var, type, perm)
@@ -191,6 +192,8 @@ struct bin_attribute {
 		char *, loff_t, size_t);
 	ssize_t (*write)(struct file *, struct kobject *, const struct bin_attribute *,
 		char *, loff_t, size_t);
+	int (*mmap)(struct file *, struct kobject *, const struct bin_attribute *,
+		struct vm_area_struct *);
 };
 struct kobj_attribute {
 	struct attribute attr;
@@ -355,6 +358,9 @@ struct device_driver {
 	const struct bus_type *bus;
 	struct module *owner;
 	const struct dev_pm_ops *pm;
+	int (*probe)(struct device *dev);
+	int (*remove)(struct device *dev);
+	void (*shutdown)(struct device *dev);
 };
 
 struct class {
@@ -362,8 +368,13 @@ struct class {
 	char *(*devnode)(const struct device *dev, umode_t *mode);
 };
 
+struct kobj_uevent_env;
+struct dev_pm_ops;
 struct bus_type {
 	const char *name;
+	int (*match)(struct device *dev, const struct device_driver *drv);
+	int (*uevent)(const struct device *dev, struct kobj_uevent_env *env);
+	const struct dev_pm_ops *pm;
 };
 
 static inline const char *dev_name(const struct device *dev)

@@ -29,6 +29,66 @@
 #include "i915_drv.h"
 #include "i915_mm.h"
 
+#ifdef __HAIKU_LINUX_COMPAT__
+/*
+ * Haiku: a fault handler records the page frames it maps with
+ * vmf_insert_pfn_prot() (the compat layer's lx/vma.h), and the driver maps
+ * them into the team; there are no page tables to fill here.
+ */
+#define use_dma(io) ((io) != -1)
+
+int remap_io_mapping(struct vm_area_struct *vma,
+		     unsigned long addr, unsigned long pfn, unsigned long size,
+		     struct io_mapping *iomap)
+{
+	pgprot_t prot = __pgprot((pgprot_val(iomap->prot) & _PAGE_CACHE_MASK) |
+				 (pgprot_val(vma->vm_page_prot) & ~_PAGE_CACHE_MASK));
+	unsigned long offset;
+
+	for (offset = 0; offset < size; offset += PAGE_SIZE) {
+		if (vmf_insert_pfn_prot(vma, addr + offset, pfn++, prot) !=
+		    VM_FAULT_NOPAGE)
+			return -EFAULT;
+	}
+	return 0;
+}
+
+int remap_io_sg(struct vm_area_struct *vma,
+		unsigned long addr, unsigned long size,
+		struct scatterlist *sgl, unsigned long offset,
+		resource_size_t iobase)
+{
+	struct sgt_iter sgt = __sgt_iter(sgl, use_dma(iobase));
+	unsigned long done;
+
+	while (offset >= sgt.max >> PAGE_SHIFT) {
+		offset -= sgt.max >> PAGE_SHIFT;
+		sgt = __sgt_iter(__sg_next(sgt.sgp), use_dma(iobase));
+		if (!sgt.sgp)
+			return -EINVAL;
+	}
+	sgt.curr = offset << PAGE_SHIFT;
+
+	for (done = 0; done < size; done += PAGE_SIZE) {
+		unsigned long pfn;
+
+		if (GEM_WARN_ON(!sgt.sgp))
+			return -EINVAL;
+		if (use_dma(iobase))
+			pfn = (sgt.dma + sgt.curr + iobase) >> PAGE_SHIFT;
+		else
+			pfn = sgt.pfn + (sgt.curr >> PAGE_SHIFT);
+		if (vmf_insert_pfn_prot(vma, addr + done, pfn,
+					vma->vm_page_prot) != VM_FAULT_NOPAGE)
+			return -EFAULT;
+
+		sgt.curr += PAGE_SIZE;
+		if (sgt.curr >= sgt.max)
+			sgt = __sgt_iter(__sg_next(sgt.sgp), use_dma(iobase));
+	}
+	return 0;
+}
+#else
 struct remap_pfn {
 	struct mm_struct *mm;
 	unsigned long pfn;
@@ -162,3 +222,4 @@ int remap_io_sg(struct vm_area_struct *vma,
 
 	return 0;
 }
+#endif /* __HAIKU_LINUX_COMPAT__ */

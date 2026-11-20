@@ -54,7 +54,11 @@ typedef struct poll_table_struct {
 } poll_table;
 void lx_poll_wait(struct file *filp, struct wait_queue_head *wait_address,
 	poll_table *p);
-#define poll_wait(filp, wq, p)	lx_poll_wait(filp, wq, p)
+static inline void poll_wait(struct file *filp,
+	struct wait_queue_head *wait_address, poll_table *p)
+{
+	lx_poll_wait(filp, wait_address, p);
+}
 #define poll_requested_events(p)	((p) ? (p)->_key : ~(__poll_t)0)
 #define poll_does_not_wait(p)	((p) == NULL)
 

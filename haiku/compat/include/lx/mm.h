@@ -304,14 +304,23 @@ struct folio {
 #define shmem_writeout(folio, plug, list)	(-ENOSYS)
 #define inode_set_bytes(inode, bytes)	do { } while (0)
 #define file_clone_open(f)	((struct file *)ERR_PTR(-ENOSYS))
+#ifdef LX_ADDON_I915
+/* i915 maps buffers through a file of its own and puts its reference right
+ * after: the mapping takes one (haiku/i915/glue.c puts it) */
+#define vma_set_file(vma, file) \
+	do { get_file(file); (vma)->vm_file = (file); } while (0)
+#else
 #define vma_set_file(vma, file)	do { (vma)->vm_file = (file); } while (0)
+#endif
 void *vmap(struct page **pages, unsigned int count, unsigned long flags,
 	pgprot_t prot);
 void vunmap(const void *addr);
 #define VM_MAP		0x00000004
 #define VM_IOREMAP	0x00000001
 #define VM_USERMAP	0x00000008
-#define vmap_pfn(pfns, count, prot)	NULL
+void *vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot);
+/* vfree() of the mapping puts the pages and frees the array */
+#define VM_MAP_PUT_PAGES	0x00000200
 #define folio_test_highmem(f)	false
 #define folio_set_dirty(f)	do { } while (0)
 #define folio_clear_dirty(f) do { } while (0)
@@ -690,19 +699,43 @@ void mmdrop(struct mm_struct *mm);
 #define pin_user_pages(start, nr, flags, pages)	(-EFAULT)
 
 /* page cache, shmem: no swapping of graphics memory */
+struct inode;
 struct address_space {
-	void *host;
+	struct inode *host;
 	unsigned long nrpages;
 	const void *a_ops;
+	struct xarray *lx_pages;	/* shmem files (i915): index -> page */
 };
 struct file *shmem_file_setup(const char *name, loff_t size, unsigned long flags);
 #define shmem_file_setup_with_mnt(mnt, name, size, flags) \
 	shmem_file_setup(name, size, flags)
+#ifdef LX_ADDON_I915
+/*	i915 keeps its buffer objects in shmem files: here memory only, pages
+	allocated (zeroed) when first read, kept until truncated or the file
+	goes; never swapped out. */
+struct folio *shmem_read_folio_gfp(struct address_space *mapping,
+	unsigned long index, gfp_t gfp);
+#define shmem_read_folio(mapping, index) \
+	shmem_read_folio_gfp(mapping, index, GFP_KERNEL)
+static inline struct page *shmem_read_mapping_page_gfp(
+	struct address_space *mapping, unsigned long index, gfp_t gfp)
+{
+	struct folio *folio = shmem_read_folio_gfp(mapping, index, gfp);
+	if (IS_ERR(folio))
+		return ERR_CAST(folio);
+	return &folio->page;
+}
+#define shmem_read_mapping_page(mapping, index) \
+	shmem_read_mapping_page_gfp(mapping, index, GFP_KERNEL)
+struct inode;
+void shmem_truncate_range(struct inode *inode, loff_t start, loff_t end);
+#else
 #define shmem_read_mapping_page_gfp(mapping, index, gfp)	ERR_PTR(-ENOSYS)
 #define shmem_read_mapping_page(mapping, index)	ERR_PTR(-ENOSYS)
 #define shmem_read_folio_gfp(mapping, index, gfp)	ERR_PTR(-ENOSYS)
 #define shmem_read_folio(mapping, index)	ERR_PTR(-ENOSYS)
 #define shmem_truncate_range(inode, start, end)	do { } while (0)
+#endif
 #define mapping_set_unevictable(mapping)	do { } while (0)
 #define mapping_clear_unevictable(mapping)	do { } while (0)
 #define mapping_gfp_mask(mapping)	GFP_KERNEL

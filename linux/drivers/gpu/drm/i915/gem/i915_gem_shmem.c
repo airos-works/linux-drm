@@ -304,6 +304,10 @@ shmem_truncate(struct drm_i915_gem_object *obj)
 
 void __shmem_writeback(size_t size, struct address_space *mapping)
 {
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* Haiku: shmem pages are never swapped out */
+}
+#else
 	struct writeback_control wbc = {
 		.sync_mode = WB_SYNC_NONE,
 		.nr_to_write = SWAP_CLUSTER_MAX,
@@ -326,6 +330,7 @@ void __shmem_writeback(size_t size, struct address_space *mapping)
 			error = shmem_writeout(folio, NULL, NULL);
 	}
 }
+#endif
 
 static void
 shmem_writeback(struct drm_i915_gem_object *obj)
@@ -407,11 +412,13 @@ shmem_pwrite(struct drm_i915_gem_object *obj,
 	     const struct drm_i915_gem_pwrite *arg)
 {
 	char __user *user_data = u64_to_user_ptr(arg->data_ptr);
+#ifndef __HAIKU_LINUX_COMPAT__
 	struct file *file = obj->base.filp;
 	struct kiocb kiocb;
 	struct iov_iter iter;
 	ssize_t written;
 	u64 size = arg->size;
+#endif
 
 	/* Caller already validated user args */
 	GEM_BUG_ON(!access_ok(user_data, arg->size));
@@ -430,6 +437,12 @@ shmem_pwrite(struct drm_i915_gem_object *obj,
 	 */
 	if (i915_gem_object_has_pages(obj))
 		return -ENODEV;
+
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* Haiku: no page cache writes; i915_gem_pwrite_ioctl() writes through
+	 * the object's pages instead */
+	return -ENODEV;
+#else
 
 	if (obj->mm.madv != I915_MADV_WILLNEED)
 		return -EFAULT;
@@ -454,6 +467,7 @@ shmem_pwrite(struct drm_i915_gem_object *obj,
 		return written;
 
 	return 0;
+#endif
 }
 
 static int

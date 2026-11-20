@@ -9,7 +9,8 @@
 #include "intel_gtt.h"
 
 /* For x86 platforms */
-#if IS_ENABLED(CONFIG_X86)
+/* Haiku: no AGP/intel-gtt (GPUs before Sandy Bridge), so the stubs */
+#if IS_ENABLED(CONFIG_X86) && !defined(__HAIKU_LINUX_COMPAT__)
 
 void intel_ggtt_gmch_flush(void);
 int intel_ggtt_gmch_enable_hw(struct drm_i915_private *i915);

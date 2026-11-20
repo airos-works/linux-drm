@@ -311,10 +311,65 @@ void synchronize_irq(unsigned int irq);
 #define enable_irq_wake(irq)	0
 #define disable_irq_wake(irq)	0
 #define local_irq_enable_in_hardirq()	do { } while (0)
-#define tasklet_init(t, f, d)	do { } while (0)
-#define tasklet_schedule(t)		do { } while (0)
-#define tasklet_kill(t)			do { } while (0)
-struct tasklet_struct { int dummy; };
+
+/*	Tasklets: run by a high priority workqueue of their own (softirqs have
+	no equivalent here), with Linux's state bits, so a tasklet runs on one
+	CPU at a time, never while disabled, and code that locks one to call it
+	directly (i915's execlists) works as on Linux. */
+enum {
+	TASKLET_STATE_SCHED,	/* scheduled for execution */
+	TASKLET_STATE_RUN		/* running */
+};
+struct tasklet_struct {
+	struct tasklet_struct *next;
+	unsigned long state;
+	atomic_t count;
+	bool use_callback;
+	union {
+		void (*func)(unsigned long data);
+		void (*callback)(struct tasklet_struct *t);
+	};
+	unsigned long data;
+	struct work_struct lx_work;
+};
+void tasklet_setup(struct tasklet_struct *t,
+	void (*callback)(struct tasklet_struct *));
+void tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long),
+	unsigned long data);
+void tasklet_schedule(struct tasklet_struct *t);
+#define tasklet_hi_schedule(t)	tasklet_schedule(t)
+void tasklet_kill(struct tasklet_struct *t);
+void tasklet_unlock_wait(struct tasklet_struct *t);
+void tasklet_unlock_spin_wait(struct tasklet_struct *t);
+void tasklet_enable(struct tasklet_struct *t);
+#define from_tasklet(var, callback_tasklet, tasklet_fieldname) \
+	container_of(callback_tasklet, typeof(*var), tasklet_fieldname)
+static inline bool tasklet_trylock(struct tasklet_struct *t)
+{
+	return !test_and_set_bit(TASKLET_STATE_RUN, &t->state);
+}
+static inline void tasklet_unlock(struct tasklet_struct *t)
+{
+	smp_mb__before_atomic();
+	clear_bit(TASKLET_STATE_RUN, &t->state);
+}
+static inline void tasklet_disable_nosync(struct tasklet_struct *t)
+{
+	atomic_inc(&t->count);
+	smp_mb__after_atomic();
+}
+static inline void tasklet_disable_in_atomic(struct tasklet_struct *t)
+{
+	tasklet_disable_nosync(t);
+	tasklet_unlock_spin_wait(t);
+	smp_mb();
+}
+static inline void tasklet_disable(struct tasklet_struct *t)
+{
+	tasklet_disable_nosync(t);
+	tasklet_unlock_wait(t);
+	smp_mb();
+}
 struct irq_domain;
 struct irq_chip;
 struct irq_data;
@@ -618,7 +673,7 @@ struct fb_cmap;
 /* EFI, firmware frame buffers */
 #define efi_enabled(f)		false
 #define EFI_BOOT			0
-#ifdef LX_ADDON_NOUVEAU
+#if defined(LX_ADDON_NOUVEAU) || defined(LX_ADDON_I915)
 /* the firmware's frame buffer goes when it lies in one of the GPU's
    apertures (compat/src/pci.c) */
 struct pci_dev;

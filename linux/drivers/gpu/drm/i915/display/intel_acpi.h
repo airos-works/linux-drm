@@ -8,7 +8,8 @@
 
 struct intel_display;
 
-#ifdef CONFIG_ACPI
+/* Haiku: the ACPI glue (_DSM, _DOD) is not built, only the OpRegion */
+#if defined(CONFIG_ACPI) && !defined(__HAIKU_LINUX_COMPAT__)
 void intel_register_dsm_handler(void);
 void intel_unregister_dsm_handler(void);
 void intel_dsm_get_bios_data_funcs_supported(struct intel_display *display);

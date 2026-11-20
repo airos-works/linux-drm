@@ -78,3 +78,25 @@
 #define CONFIG_DRM_ACCEL_AMDXDNA 1
 #define CONFIG_DRM_GEM_SHMEM_HELPER 1
 #endif
+
+/* The Intel add-on (make i915, haiku/i915): Linux's i915 with its Kconfig
+ * defaults, without user pointers (MMU notifiers), PXP, GVT or error
+ * capture. CONFIG_ACPI only for it: the OpRegion holds the VBT (the
+ * board's outputs and panel), the rest of ACPI is stubbed. */
+#ifdef LX_ADDON_I915
+#define CONFIG_DRM_I915 1
+#define CONFIG_DRM_I915_FORCE_PROBE ""
+#define CONFIG_DRM_I915_REQUEST_TIMEOUT 20000
+#define CONFIG_DRM_I915_FENCE_TIMEOUT 10000
+#define CONFIG_DRM_I915_USERFAULT_AUTOSUSPEND 250
+#define CONFIG_DRM_I915_HEARTBEAT_INTERVAL 2500
+#define CONFIG_DRM_I915_PREEMPT_TIMEOUT 640
+#define CONFIG_DRM_I915_PREEMPT_TIMEOUT_COMPUTE 7500
+#define CONFIG_DRM_I915_MAX_REQUEST_BUSYWAIT 8000
+#define CONFIG_DRM_I915_STOP_TIMEOUT 100
+#define CONFIG_DRM_I915_TIMESLICE_DURATION 1
+/* the panel helpers of its DSI encoders */
+#define CONFIG_DRM_PANEL 1
+#define CONFIG_DRM_MIPI_DSI 1
+#define CONFIG_ACPI 1
+#endif

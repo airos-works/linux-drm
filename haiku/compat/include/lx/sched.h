@@ -678,15 +678,23 @@ extern struct workqueue_struct *system_freezable_power_efficient_wq;
 #define flush_scheduled_work()	flush_workqueue(system_wq)
 
 /* irq_work: run "soon" from a thread */
+#include <linux/llist.h>
 struct irq_work {
 	struct work_struct work;
 	void (*func)(struct irq_work *);
+	struct {
+		struct llist_node llist;	/* for the owner's lists (i915) */
+		unsigned int u_flags;
+	} node;
 };
 void lx_irq_work_fn(struct work_struct *work);
 #define init_irq_work(w, f) \
 	do { INIT_WORK(&(w)->work, lx_irq_work_fn); (w)->func = (f); } while (0)
 #define IRQ_WORK_INIT(f)	{ .work = __WORK_INITIALIZER(work, lx_irq_work_fn), .func = (f) }
-#define irq_work_queue(w)	queue_work(system_highpri_wq, &(w)->work)
+static inline bool irq_work_queue(struct irq_work *w)
+{
+	return queue_work(system_highpri_wq, &w->work);
+}
 #define irq_work_queue_on(w, cpu)	irq_work_queue(w)
 #define irq_work_sync(w)	flush_work(&(w)->work)
 #define irq_work_is_pending(w)	work_pending(&(w)->work)

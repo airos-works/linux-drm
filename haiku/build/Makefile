@@ -29,6 +29,10 @@ ifeq ($(KIND),amdxdna)
 DRIVER := $(ROOT)/haiku/amdxdna
 ADDON_NAME := amdxdna
 OUT ?= $(ROOT)/out-xdna
+else ifeq ($(KIND),i915)
+DRIVER := $(ROOT)/haiku/i915
+ADDON_NAME := i915_drm
+OUT ?= $(ROOT)/out-i915
 else ifeq ($(KIND),nouveau)
 DRIVER := $(ROOT)/haiku/nouveau
 # LAB=1: a second copy beside the running driver, for one GPU the running
@@ -66,7 +70,7 @@ GCC_SYSLIBS := $(firstword $(wildcard $(HAIKU_BUILD)/build_packages/gcc_syslibs_
 ADDON := $(OUT)/$(ADDON_NAME)
 
 # Lab builds: make ... ARMED_ONLY=1 (see driver.cpp)
-HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY -DNOUVEAU_DRM_ARMED_ONLY) \
+HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY -DNOUVEAU_DRM_ARMED_ONLY -DI915_DRM_ARMED_ONLY) \
 	$(if $(LAB),-DNOUVEAU_LAB)
 
 # Call trace builds (see compat/src/trace.c), best into their own OUT:
@@ -121,6 +125,10 @@ ifeq ($(KIND),amdxdna)
 AMD_INCLUDES := -I$(LINUX)/drivers/accel/amdxdna
 # what the kernel configuration (generated/autoconf.h) adds for this add-on
 LXFLAGS += -DLX_ADDON_AMDXDNA
+else ifeq ($(KIND),i915)
+# i915's own include directory, as its Makefile names it
+AMD_INCLUDES := -I$(LINUX)/drivers/gpu/drm/i915 -DI915
+LXFLAGS += -DLX_ADDON_I915
 else ifeq ($(KIND),nouveau)
 # nouveau's own include directories, as its Kbuild names them
 NOUVEAU := $(LINUX)/drivers/gpu/drm/nouveau
@@ -179,6 +187,12 @@ ifeq ($(KIND),amdxdna)
 CORE_SRCS += drivers/gpu/drm/drm_gem_shmem_helper.c
 AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdxdna.txt)
 AMD_FP_SRCS :=
+else ifeq ($(KIND),i915)
+# Intel's i915, with TTM (its discrete GPUs' memory regions use it), and
+# the MIPI DSI and panel helpers of its DSI encoders
+CORE_SRCS += drivers/gpu/drm/drm_mipi_dsi.c drivers/gpu/drm/drm_panel.c
+AMD_SRCS := $(shell cat $(BUILDDIR)/sources-i915.txt)
+AMD_FP_SRCS :=
 else ifeq ($(KIND),nouveau)
 # nouveau, with the GPU VA manager its VM_BIND interface (NVK) uses
 CORE_SRCS += drivers/gpu/drm/drm_gpuvm.c
@@ -217,7 +231,7 @@ $(TRACE_OBJS): GROUP_FLAGS += -finstrument-functions \
 	-finstrument-functions-exclude-file-list=/include/ \
 	-finstrument-functions-exclude-function-list=$(TRACE_EXCLUDE)
 
-.PHONY: all core amdgpu amdxdna nouveau compat haiku clean
+.PHONY: all core amdgpu amdxdna nouveau i915 compat haiku clean
 all: $(ADDON)
 ifeq ($(KIND),amdgpu)
 # the NPU driver: this Makefile again, for the other add-on
@@ -226,6 +240,9 @@ amdxdna:
 # the NVIDIA driver (haiku/nouveau, Linux's nouveau), likewise
 nouveau:
 	@$(MAKE) --no-print-directory -f $(THIS_MAKEFILE) all KIND=nouveau
+# the Intel driver (haiku/i915, Linux's i915)
+i915:
+	@$(MAKE) --no-print-directory -f $(THIS_MAKEFILE) all KIND=i915
 endif
 core: $(CORE_OBJS)
 amdgpu: $(AMD_OBJS) $(AMD_FP_OBJS)

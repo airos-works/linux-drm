@@ -399,10 +399,23 @@ lx_vmalloc(size_t size, gfp_t flags)
 }
 
 
+struct lx_put_pages_map {
+	struct list_head link;
+	void *address;
+	struct page **pages;
+	unsigned int count;
+};
+static LIST_HEAD(sPutPagesMaps);
+static DEFINE_SPINLOCK(sPutPagesLock);
+static bool vfree_put_pages(const void *address);
+
+
 void
 lx_vfree(const void *address)
 {
 	if (address == NULL)
+		return;
+	if (vfree_put_pages(address))
 		return;
 	if (lx_haiku_area_free((void *)address) != 0)
 		lx_kfree(address);
@@ -1407,7 +1420,71 @@ vmap(struct page **pages, unsigned int count, unsigned long flags,
 		physical[i] = page_to_phys(pages[i]);
 	address = lx_haiku_vmap(physical, count, type);
 	kfree(physical);
+	if (address != NULL && (flags & VM_MAP_PUT_PAGES) != 0) {
+		struct lx_put_pages_map *map = kmalloc(sizeof(*map), GFP_KERNEL);
+		if (map == NULL) {
+			lx_haiku_vunmap(address);
+			return NULL;
+		}
+		map->address = address;
+		map->pages = pages;
+		map->count = count;
+		spin_lock(&sPutPagesLock);
+		list_add(&map->link, &sPutPagesMaps);
+		spin_unlock(&sPutPagesLock);
+	}
 	return address;
+}
+
+
+void *
+vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot)
+{
+	unsigned long long *physical;
+	void *address;
+	unsigned int i;
+	int type = LX_HAIKU_MAP_WB;
+
+	if ((pgprot_val(prot) & _PAGE_CACHE_MASK) == 0x18)
+		type = LX_HAIKU_MAP_UC;
+	else if (pgprot_val(prot) & 0x8)
+		type = LX_HAIKU_MAP_WC;
+
+	physical = kmalloc_array(count, sizeof(*physical), GFP_KERNEL);
+	if (physical == NULL)
+		return NULL;
+	for (i = 0; i < count; i++)
+		physical[i] = (unsigned long long)pfns[i] << PAGE_SHIFT;
+	address = lx_haiku_vmap(physical, count, type);
+	kfree(physical);
+	return address;
+}
+
+
+/* vfree() of a VM_MAP_PUT_PAGES mapping: true if it was one */
+static bool
+vfree_put_pages(const void *address)
+{
+	struct lx_put_pages_map *map, *found = NULL;
+	unsigned int i;
+
+	spin_lock(&sPutPagesLock);
+	list_for_each_entry(map, &sPutPagesMaps, link) {
+		if (map->address == address) {
+			list_del(&map->link);
+			found = map;
+			break;
+		}
+	}
+	spin_unlock(&sPutPagesLock);
+	if (found == NULL)
+		return false;
+	lx_haiku_vunmap((void *)address);
+	for (i = 0; i < found->count; i++)
+		put_page(found->pages[i]);
+	kvfree(found->pages);
+	kfree(found);
+	return true;
 }
 
 
@@ -1660,11 +1737,160 @@ strnlen_user(const char __user *str, long n)
 /* #pragma mark - things graphics memory does without */
 
 
+#ifdef LX_ADDON_I915
+
+static DEFINE_MUTEX(sShmemLock);
+
+
+static void
+shmem_free_pages(struct address_space *mapping, unsigned long first,
+	unsigned long last)
+{
+	unsigned long index;
+	struct page *page;
+
+	mutex_lock(&sShmemLock);
+	xa_for_each_range(mapping->lx_pages, index, page, first, last) {
+		xa_erase(mapping->lx_pages, index);
+		mapping->nrpages--;
+		page->mapping = NULL;
+		put_page(page);
+	}
+	mutex_unlock(&sShmemLock);
+}
+
+
+static int
+shmem_release(struct inode *inode, struct file *file)
+{
+	struct address_space *mapping = inode->i_mapping;
+	if (mapping->lx_pages != NULL) {
+		shmem_free_pages(mapping, 0, ULONG_MAX);
+		xa_destroy(mapping->lx_pages);
+		kfree(mapping->lx_pages);
+		mapping->lx_pages = NULL;
+	}
+	return 0;
+}
+
+
+static const struct file_operations sShmemOps = {
+	.release = shmem_release,
+};
+
+
+struct file *
+shmem_file_setup(const char *name, loff_t size, unsigned long flags)
+{
+	struct file *file = kzalloc(sizeof(*file), GFP_KERNEL);
+	struct inode *inode = kzalloc(sizeof(*inode), GFP_KERNEL);
+	struct xarray *pages = kzalloc(sizeof(*pages), GFP_KERNEL);
+	if (file == NULL || inode == NULL || pages == NULL) {
+		kfree(file);
+		kfree(inode);
+		kfree(pages);
+		return ERR_PTR(-ENOMEM);
+	}
+	xa_init(pages);
+	atomic_long_set(&file->f_count, 1);
+	spin_lock_init(&file->f_lock);
+	mutex_init(&file->f_pos_lock);
+	file->f_mode = FMODE_READ | FMODE_WRITE;
+	file->f_op = &sShmemOps;
+	file->f_inode = inode;
+	inode->i_size = size;
+	inode->i_mapping = &inode->i_data;
+	inode->i_data.host = inode;
+	inode->i_data.lx_pages = pages;
+	file->f_mapping = inode->i_mapping;
+	return file;
+}
+
+
+struct folio *
+shmem_read_folio_gfp(struct address_space *mapping, unsigned long index,
+	gfp_t gfp)
+{
+	struct page *page;
+
+	if (mapping == NULL || mapping->lx_pages == NULL)
+		return ERR_PTR(-EINVAL);
+
+	mutex_lock(&sShmemLock);
+	page = xa_load(mapping->lx_pages, index);
+	if (page == NULL) {
+		void *old;
+		page = lx_alloc_pages((gfp & ~__GFP_HIGHMEM) | __GFP_ZERO, 0);
+		if (page == NULL) {
+			mutex_unlock(&sShmemLock);
+			return ERR_PTR(-ENOMEM);
+		}
+		page->mapping = mapping;
+		page->index = index;
+		old = xa_store(mapping->lx_pages, index, page, GFP_KERNEL);
+		if (xa_is_err(old)) {
+			mutex_unlock(&sShmemLock);
+			put_page(page);
+			return ERR_PTR(xa_err(old));
+		}
+		mapping->nrpages++;
+	}
+	get_page(page);
+	mutex_unlock(&sShmemLock);
+	return page_folio(page);
+}
+
+
+ssize_t
+kernel_write(struct file *file, const void *buf, size_t count, loff_t *pos)
+{
+	struct address_space *mapping = file->f_mapping;
+	size_t done = 0;
+
+	if (mapping == NULL || mapping->lx_pages == NULL)
+		return -EINVAL;
+	while (done < count) {
+		loff_t at = *pos + done;
+		size_t offset = at & (PAGE_SIZE - 1);
+		size_t length = min_t(size_t, PAGE_SIZE - offset, count - done);
+		struct folio *folio = shmem_read_folio_gfp(mapping, at >> PAGE_SHIFT,
+			GFP_KERNEL);
+		void *vaddr;
+		if (IS_ERR(folio))
+			return done ? (ssize_t)done : PTR_ERR(folio);
+		vaddr = kmap_local_page(&folio->page);
+		memcpy((char *)vaddr + offset, (const char *)buf + done, length);
+		kunmap_local(vaddr);
+		folio_put(folio);
+		done += length;
+	}
+	*pos += done;
+	return done;
+}
+
+
+void
+shmem_truncate_range(struct inode *inode, loff_t start, loff_t end)
+{
+	struct address_space *mapping = inode->i_mapping;
+	unsigned long first = DIV_ROUND_UP(start, PAGE_SIZE);
+	unsigned long last = end == (loff_t)-1 ? ULONG_MAX
+		: (unsigned long)((end + 1) >> PAGE_SHIFT) - 1;
+	if (mapping == NULL || mapping->lx_pages == NULL
+		|| (end != (loff_t)-1 && (end + 1) >> PAGE_SHIFT <= first))
+		return;
+	shmem_free_pages(mapping, first, last);
+}
+
+#else
+
 struct file *
 shmem_file_setup(const char *name, loff_t size, unsigned long flags)
 {
 	return ERR_PTR(-ENOSYS);
 }
+
+#endif
 
 
 struct shrinker *

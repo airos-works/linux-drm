@@ -911,7 +911,7 @@ lx_pci_match(struct pci_driver *driver, struct pci_dev *dev)
 }
 
 
-#ifdef LX_ADDON_NOUVEAU
+#if defined(LX_ADDON_NOUVEAU) || defined(LX_ADDON_I915)
 int lx_haiku_remove_boot_frame_buffer(unsigned long long start,
 	unsigned long long end);
 

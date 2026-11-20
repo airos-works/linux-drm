@@ -398,6 +398,12 @@ static const struct drm_i915_gem_object_ops i915_gem_userptr_ops = {
 
 static int
 probe_range(struct mm_struct *mm, unsigned long addr, unsigned long len)
+#ifdef __HAIKU_LINUX_COMPAT__
+{
+	/* Haiku: no user pointer objects (no MMU notifiers) */
+	return -ENODEV;
+}
+#else
 {
 	VMA_ITERATOR(vmi, mm, addr);
 	struct vm_area_struct *vma;
@@ -420,6 +426,7 @@ probe_range(struct mm_struct *mm, unsigned long addr, unsigned long len)
 		return -EFAULT;
 	return 0;
 }
+#endif
 
 /*
  * Creates a new mm object that wraps some normal memory from the process
