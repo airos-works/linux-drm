@@ -2060,3 +2060,144 @@ lx_glue_backlight(void *_file, int brightness, int *_level, int *_maximum)
 {
 	return -ENODEV;
 }
+
+
+/* #pragma mark - buffers of host memory */
+
+/*	DRM_HAIKU_IOCTL_HOST_BO: a GART buffer object of the caller's own pages,
+	made as nouveau makes one of an imported dma-buf (its pages in a
+	scatter-gather table), the pages wired as amdgpu_drm wires its userptr
+	buffers' (userptr.c). Several GPUs can each have one of the same memory,
+	which is how app_server's flush source reaches every GPU of a desktop. */
+struct lx_host_bo {
+	struct drm_gem_object_funcs funcs;	/* nouveau's, with our free */
+	const struct drm_gem_object_funcs *nouveau_funcs;
+	struct lx_userptr *userptr;
+	struct sg_table *sg;
+	struct device *dma_dev;
+};
+
+
+static void
+lx_host_bo_free(struct drm_gem_object *obj)
+{
+	struct lx_host_bo *host = container_of(obj->funcs, struct lx_host_bo,
+		funcs);
+	struct lx_userptr *userptr = host->userptr;
+	struct sg_table *sg = host->sg;
+	struct device *dma_dev = host->dma_dev;
+
+	/* the GPU may still read the pages */
+	dma_resv_wait_timeout(obj->resv, DMA_RESV_USAGE_BOOKKEEP, false,
+		MAX_SCHEDULE_TIMEOUT);
+	lx_userptr_detach(userptr);
+	obj->funcs = host->nouveau_funcs;
+	host->nouveau_funcs->free(obj);
+		/* TTM frees the buffer once it is idle, which it is */
+	dma_unmap_sgtable(dma_dev, sg, DMA_TO_DEVICE, 0);
+	sg_free_table(sg);
+	kfree(sg);
+	lx_userptr_release(userptr);
+	kfree(host);
+}
+
+
+int
+lx_glue_host_bo(void *_file, struct lx_glue_host_bo_args *args)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct drm_device *dev = file->minor->dev;
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct nouveau_cli *cli = nouveau_cli(file);
+	unsigned long count = args->size >> PAGE_SHIFT;
+	struct lx_host_bo *host;
+	struct hmm_range *range;
+	struct page **pages;
+	struct nouveau_bo *nvbo;
+	struct nouveau_vma *vma;
+	u64 size = args->size;
+	int align = 0;
+	unsigned long i;
+	int ret;
+
+	if (args->flags != 0 || count == 0 || (args->address & ~PAGE_MASK) != 0
+		|| (args->size & ~PAGE_MASK) != 0)
+		return -EINVAL;
+
+	host = kzalloc(sizeof(*host), GFP_KERNEL);
+	pages = kvmalloc_array(count, sizeof(*pages), GFP_KERNEL);
+	if (host == NULL || pages == NULL) {
+		kfree(host);
+		kvfree(pages);
+		return -ENOMEM;
+	}
+	host->dma_dev = dev->dev;
+
+	ret = lx_userptr_create(NULL, args->address, count, false, false,
+		&host->userptr);
+	if (ret != 0)
+		goto err_free;
+	ret = lx_userptr_get_pages(host->userptr, &range);
+	if (ret != 0)
+		goto err_userptr;
+	for (i = 0; i < count; i++)
+		pages[i] = (struct page *)range->hmm_pfns[i];
+	lx_userptr_get_pages_done(range);
+
+	host->sg = drm_prime_pages_to_sg(dev, pages, count);
+	if (IS_ERR(host->sg)) {
+		ret = PTR_ERR(host->sg);
+		host->sg = NULL;
+		goto err_userptr;
+	}
+	ret = dma_map_sgtable(dev->dev, host->sg, DMA_TO_DEVICE, 0);
+	if (ret != 0)
+		goto err_sg;
+
+	nvbo = nouveau_bo_alloc(&drm->client, &size, &align,
+		NOUVEAU_GEM_DOMAIN_GART, 0, 0, true);
+	if (IS_ERR(nvbo)) {
+		ret = PTR_ERR(nvbo);
+		goto err_unmap;
+	}
+	nvbo->valid_domains = NOUVEAU_GEM_DOMAIN_GART;
+	host->funcs = nouveau_gem_object_funcs;
+	host->nouveau_funcs = &nouveau_gem_object_funcs;
+	host->funcs.free = lx_host_bo_free;
+	host->funcs.export = NULL;
+	nvbo->bo.base.funcs = &host->funcs;
+	drm_gem_private_object_init(dev, &nvbo->bo.base, size);
+	ret = nouveau_bo_init(nvbo, size, align, NOUVEAU_GEM_DOMAIN_GART,
+		host->sg, NULL);
+	if (ret != 0) {
+		/* nouveau_bo_init() put the buffer already */
+		goto err_unmap;
+	}
+	lx_userptr_set_object(host->userptr, &nvbo->bo.base);
+
+	ret = drm_gem_handle_create(file, &nvbo->bo.base, &args->handle);
+	if (ret == 0) {
+		/* the address in this file's VM: drm_gem_handle_create() opened
+		   the object there (nouveau_gem_object_open()) */
+		vma = nouveau_vma_find(nvbo, nouveau_cli_vmm(cli));
+		args->offset = vma != NULL ? vma->addr : 0;
+	}
+	/* the handle holds the object now (or nothing does: then it is freed,
+	   and its free hook lets everything go) */
+	drm_gem_object_put(&nvbo->bo.base);
+	kvfree(pages);
+	return ret;
+
+err_unmap:
+	dma_unmap_sgtable(dev->dev, host->sg, DMA_TO_DEVICE, 0);
+err_sg:
+	sg_free_table(host->sg);
+	kfree(host->sg);
+err_userptr:
+	lx_userptr_release(host->userptr);
+err_free:
+	kfree(host);
+	kvfree(pages);
+	return ret;
+}

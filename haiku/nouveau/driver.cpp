@@ -191,6 +191,9 @@ static const uint32 kDrmHaikuCrc = LX_IOC(3, 'd', 0xf7,
 // the screen's frame buffer: lx_glue_scanout_args (glue.h) is its layout
 static const uint32 kDrmHaikuScanout = LX_IOC(3, 'd', 0xf8,
 	sizeof(lx_glue_scanout_args));
+// a buffer object of the caller's memory: lx_glue_host_bo_args (glue.h)
+static const uint32 kDrmHaikuHostBo = LX_IOC(3, 'd', 0xf9,
+	sizeof(lx_glue_host_bo_args));
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -797,6 +800,11 @@ device_open(const char* name, uint32 flags, void** _cookie)
 }
 
 
+extern "C" void lx_trace_close_begin(void);
+extern "C" void lx_trace_close_step(const char* step);
+extern "C" void lx_trace_close_end(void);
+
+
 static status_t
 device_close(void* _cookie)
 {
@@ -809,9 +817,12 @@ device_free(void* _cookie)
 {
 	DeviceCookie* cookie = (DeviceCookie*)_cookie;
 	LAB_LOG("free minor %d: mappings\n", cookie->minor);
+	lx_trace_close_begin();
 	unmap_all(cookie);
+	lx_trace_close_step("mappings unmapped");
 	LAB_LOG("free minor %d: close\n", cookie->minor);
 	lx_glue_close(cookie->file);
+	lx_trace_close_end();
 	LAB_LOG("free minor %d: done\n", cookie->minor);
 	mutex_destroy(&cookie->lock);
 	delete cookie;
@@ -1010,6 +1021,21 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			return B_BAD_ADDRESS;
 		int error = lx_glue_crc(cookie->file, request.crtc_index,
 			request.op, request.crc, &request.frame, request.window);
+		if (error != 0)
+			return haiku_status(error);
+		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
+	}
+
+	if (op == kDrmHaikuHostBo) {
+		lx_glue_host_bo_args request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		enter_call();
+		int error = lx_glue_host_bo(cookie->file, &request);
+		leave_call();
 		if (error != 0)
 			return haiku_status(error);
 		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)

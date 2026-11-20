@@ -46,6 +46,15 @@ struct lx_glue_scanout_args {
 	unsigned long long size;
 };
 int lx_glue_scanout(void *file, struct lx_glue_scanout_args *args);
+/* DRM_HAIKU_IOCTL_HOST_BO, as struct drm_haiku_host_bo */
+struct lx_glue_host_bo_args {
+	unsigned long long address;
+	unsigned long long size;
+	unsigned int handle;
+	unsigned int flags;
+	unsigned long long offset;
+};
+int lx_glue_host_bo(void *file, struct lx_glue_host_bo_args *args);
 void *lx_glue_select(void *file, void (*notify)(void *cookie, unsigned int events),
 	void *cookie, unsigned int *ready);
 void lx_glue_deselect(void *select);

@@ -17,5 +17,8 @@ void lx_userptr_release(struct lx_userptr *userptr);
 int lx_userptr_get_pages(struct lx_userptr *userptr,
 			 struct hmm_range **range);
 bool lx_userptr_get_pages_done(struct hmm_range *range);
+/* the GEM object the team watcher waits for, once it exists */
+void lx_userptr_set_object(struct lx_userptr *userptr,
+			   struct drm_gem_object *gobj);
 
 #endif

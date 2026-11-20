@@ -228,3 +228,12 @@ lx_userptr_get_pages_done(struct hmm_range *range)
 	kfree(range);
 	return valid;
 }
+
+
+void
+lx_userptr_set_object(struct lx_userptr *userptr, struct drm_gem_object *gobj)
+{
+	mutex_lock(&userptr->lock);
+	userptr->gobj = gobj;
+	mutex_unlock(&userptr->lock);
+}

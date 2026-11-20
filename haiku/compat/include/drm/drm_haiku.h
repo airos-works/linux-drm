@@ -146,4 +146,18 @@ struct drm_haiku_scanout {
 
 #define DRM_HAIKU_IOCTL_SCANOUT	DRM_IOWR(0xf8, struct drm_haiku_scanout)
 
+/* DRM_HAIKU_IOCTL_HOST_BO (nouveau_drm): a buffer object in GART made of the
+ * caller's own memory (page aligned), which stays wired until the object is
+ * freed. Several GPUs can each have one of the same memory: app_server's
+ * frame buffer source, which every GPU of a desktop copies from. */
+struct drm_haiku_host_bo {
+	__u64 address;		/* in: page aligned */
+	__u64 size;			/* in: page aligned */
+	__u32 handle;		/* out: GEM handle on this file */
+	__u32 flags;		/* in: 0 */
+	__u64 offset;		/* out: the buffer's GPU address in this file's VM */
+};
+
+#define DRM_HAIKU_IOCTL_HOST_BO	DRM_IOWR(0xf9, struct drm_haiku_host_bo)
+
 #endif /* _DRM_HAIKU_H */
