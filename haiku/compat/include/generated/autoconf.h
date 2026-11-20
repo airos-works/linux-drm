@@ -62,6 +62,15 @@
 #define CONFIG_DRM_AMD_DC_SI 1
 
 
+/* The NVIDIA add-on (make nouveau, haiku/nouveau): Linux's nouveau with its
+ * Kconfig defaults, the GPU VA manager for its VM_BIND interface. */
+#ifdef LX_ADDON_NOUVEAU
+#define CONFIG_DRM_NOUVEAU 1
+#define CONFIG_DRM_GPUVM 1
+#define CONFIG_NOUVEAU_DEBUG 6
+#define CONFIG_NOUVEAU_DEBUG_DEFAULT 3
+#endif
+
 /* The AMD NPU add-on (make amdxdna, haiku/amdxdna): compute accelerator
  * nodes in the DRM core and the driver. Not in amdgpu_drm. */
 #ifdef LX_ADDON_AMDXDNA

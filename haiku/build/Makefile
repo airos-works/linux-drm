@@ -29,6 +29,10 @@ ifeq ($(KIND),amdxdna)
 DRIVER := $(ROOT)/haiku/amdxdna
 ADDON_NAME := amdxdna
 OUT ?= $(ROOT)/out-xdna
+else ifeq ($(KIND),nouveau)
+DRIVER := $(ROOT)/haiku/nouveau
+ADDON_NAME := nouveau_drm
+OUT ?= $(ROOT)/out-nouveau
 else
 DRIVER := $(ROOT)/haiku/amdgpu
 ADDON_NAME := amdgpu_drm
@@ -59,7 +63,7 @@ GCC_SYSLIBS := $(firstword $(wildcard $(HAIKU_BUILD)/build_packages/gcc_syslibs_
 ADDON := $(OUT)/$(ADDON_NAME)
 
 # Lab builds: make ... ARMED_ONLY=1 (see driver.cpp)
-HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY)
+HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY -DNOUVEAU_DRM_ARMED_ONLY)
 
 # Call trace builds (see compat/src/trace.c), best into their own OUT:
 #   make ... OUT=out-trace TRACE_CALLS="drivers/gpu/drm/ttm/ttm_bo.c ..."
@@ -113,6 +117,12 @@ ifeq ($(KIND),amdxdna)
 AMD_INCLUDES := -I$(LINUX)/drivers/accel/amdxdna
 # what the kernel configuration (generated/autoconf.h) adds for this add-on
 LXFLAGS += -DLX_ADDON_AMDXDNA
+else ifeq ($(KIND),nouveau)
+# nouveau's own include directories, as its Kbuild names them
+NOUVEAU := $(LINUX)/drivers/gpu/drm/nouveau
+AMD_INCLUDES := -I$(NOUVEAU)/include -I$(NOUVEAU)/include/nvkm -I$(NOUVEAU)/nvkm \
+	-I$(NOUVEAU)/nvkm/subdev/gsp -I$(NOUVEAU)
+LXFLAGS += -DLX_ADDON_NOUVEAU
 else
 AMD_INCLUDES := $(addprefix -I$(LINUX)/,$(shell cat $(BUILDDIR)/includes-amdgpu.txt))
 endif
@@ -165,6 +175,11 @@ ifeq ($(KIND),amdxdna)
 CORE_SRCS += drivers/gpu/drm/drm_gem_shmem_helper.c
 AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdxdna.txt)
 AMD_FP_SRCS :=
+else ifeq ($(KIND),nouveau)
+# nouveau, with the GPU VA manager its VM_BIND interface (NVK) uses
+CORE_SRCS += drivers/gpu/drm/drm_gpuvm.c
+AMD_SRCS := $(shell cat $(BUILDDIR)/sources-nouveau.txt)
+AMD_FP_SRCS :=
 else
 AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu.txt)
 AMD_FP_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu-fp.txt)
@@ -198,12 +213,15 @@ $(TRACE_OBJS): GROUP_FLAGS += -finstrument-functions \
 	-finstrument-functions-exclude-file-list=/include/ \
 	-finstrument-functions-exclude-function-list=$(TRACE_EXCLUDE)
 
-.PHONY: all core amdgpu amdxdna compat haiku clean
+.PHONY: all core amdgpu amdxdna nouveau compat haiku clean
 all: $(ADDON)
-ifneq ($(KIND),amdxdna)
+ifeq ($(KIND),amdgpu)
 # the NPU driver: this Makefile again, for the other add-on
 amdxdna:
 	@$(MAKE) --no-print-directory -f $(THIS_MAKEFILE) all KIND=amdxdna
+# the NVIDIA driver (haiku/nouveau, Linux's nouveau), likewise
+nouveau:
+	@$(MAKE) --no-print-directory -f $(THIS_MAKEFILE) all KIND=nouveau
 endif
 core: $(CORE_OBJS)
 amdgpu: $(AMD_OBJS) $(AMD_FP_OBJS)

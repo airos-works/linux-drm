@@ -32,5 +32,6 @@
 #include <lx/fs.h>
 #include <lx/misc.h>
 #include <lx/accel.h>
+#include <lx/nouveau.h>
 
 #endif /* _LX_ALL_H */

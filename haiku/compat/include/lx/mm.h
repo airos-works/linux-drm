@@ -420,7 +420,8 @@ void si_meminfo(struct sysinfo *val);
 #define high_memory			((void *)~0UL)
 
 /* highmem: everything is in the physical map */
-#define kmap(page)				page_address(page)
+/* a function, not a macro: nvkm's memory objects have a kmap() method */
+static inline void *kmap(struct page *page) { return page_address(page); }
 #define kunmap(page)			do { (void)(page); } while (0)
 #define kmap_local_page(page)	page_address(page)
 #define kmap_local_folio(f, off)	((char *)page_address(&(f)->page) + (off))

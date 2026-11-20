@@ -92,7 +92,13 @@ module_param_named(config, nouveau_config, charp, 0400);
 
 MODULE_PARM_DESC(debug, "debug string to pass to driver core");
 static char *nouveau_debug;
+#ifdef __HAIKU_LINUX_COMPAT__
+/* Haiku: one parameter table for the whole add-on, where drm's "debug"
+ * comes first */
+module_param_named(nvkm_debug, nouveau_debug, charp, 0400);
+#else
 module_param_named(debug, nouveau_debug, charp, 0400);
+#endif
 
 MODULE_PARM_DESC(noaccel, "disable kernel/abi16 acceleration");
 static int nouveau_noaccel = 0;

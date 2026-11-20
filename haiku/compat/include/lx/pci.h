@@ -86,6 +86,7 @@ struct pci_dev {
 	u8 revision;
 	u8 hdr_type;
 	u8 pcie_cap;
+	u8 pm_cap;
 	u8 msi_cap;
 	u8 msix_cap;
 	u8 pcie_flags_reg_lx;

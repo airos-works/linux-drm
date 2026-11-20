@@ -259,7 +259,14 @@ nouveau_gem_new(struct nouveau_cli *cli, u64 size, int align, uint32_t domain,
 
 	/* Initialize the embedded gem-object. We return a single gem-reference
 	 * to the caller, instead of a normal nouveau_bo ttm reference. */
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* Haiku: no shmem; TTM holds the buffer's pages, the GEM object needs
+	 * no backing file (as amdgpu's) */
+	drm_gem_private_object_init(drm->dev, &nvbo->bo.base, size);
+	ret = 0;
+#else
 	ret = drm_gem_object_init(drm->dev, &nvbo->bo.base, size);
+#endif
 	if (ret) {
 		drm_gem_object_release(&nvbo->bo.base);
 		kfree(nvbo);
