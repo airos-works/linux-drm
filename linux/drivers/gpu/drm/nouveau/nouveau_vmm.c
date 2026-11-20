@@ -73,6 +73,12 @@ nouveau_vma_del(struct nouveau_vma **pvma)
 	*pvma = NULL;
 }
 
+#ifdef __HAIKU_LINUX_COMPAT__
+/* lab aid: "haiku_vma_trace 1" logs every buffer's place in a VM */
+static int lx_nouveau_vma_trace;
+module_param_named(haiku_vma_trace, lx_nouveau_vma_trace, int, 0644);
+#endif
+
 int
 nouveau_vma_new(struct nouveau_bo *nvbo, struct nouveau_vmm *vmm,
 		struct nouveau_vma **pvma)
@@ -115,6 +121,14 @@ nouveau_vma_new(struct nouveau_bo *nvbo, struct nouveau_vmm *vmm,
 	}
 
 done:
+#ifdef __HAIKU_LINUX_COMPAT__
+	if (lx_nouveau_vma_trace)
+		pr_info("nouveau vma: %llx+%llx mem_type %u page %u kind %x domain %x "
+			"(%s) ret %d\n", vma->addr, (u64)mem->mem.size,
+			nvbo->bo.resource->mem_type, mem->mem.page, mem->kind,
+			nvbo->valid_domains, mem->mem.page == nvbo->page ? "mapped"
+			: "reserved", ret);
+#endif
 	if (ret)
 		nouveau_vma_del(pvma);
 	return ret;
