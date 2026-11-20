@@ -10,6 +10,18 @@ add-on for air/OS.
 - `haiku/compat/` - the Linux kernel API on Haiku's kernel.
 - `haiku/amdgpu/` - the Haiku driver: PCI device, interrupts, `/dev/dri`
   nodes, memory mapping into teams.
+- `haiku/nouveau/` - the same for Linux's nouveau (`make -f
+  haiku/build/Makefile nouveau`, add-on `nouveau_drm`): NVIDIA GPUs older
+  than Maxwell (device IDs below 0x1340; nvidia_rm keeps the newer ones).
+  Its sources are listed by `tools/nouveau-sources.py` from nouveau's Kbuild.
+  KMS goes through the amdgpu_kms accelerant, which drives several GPUs as
+  one desktop; Mesa's nouveau (GL), NVK (Vulkan, Kepler and newer) and the
+  nouveau VA-API driver run on it. Settings file
+  `~/config/settings/kernel/drivers/nouveau_drm` ("nvkm_debug" is nouveau's
+  "debug", "haiku_gpus 04:00.0" limits it to some GPUs); `LAB=1` builds a
+  `nouveau_lab` copy with its nodes in `/dev/dri/lab` for one GPU the running
+  driver leaves alone. Tested on a Quadro 400 (GT216) and a GeForce GT 710
+  (GK208B) together.
 - `haiku/amdxdna/` - a second add-on from the same compat layer and DRM
   core: Linux's driver for the NPU of AMD Ryzen AI processors (see "The AMD
   NPU" below).
