@@ -67,6 +67,16 @@ core507d_ntfy_wait_done(struct nouveau_bo *bo, u32 offset,
 			break;
 		usleep_range(1, 2);
 	);
+#ifdef __HAIKU_LINUX_COMPAT__
+	if (time < 0) {
+		bool iomem;
+		void *virt = ttm_kmap_obj_virtual(&bo->kmap, &iomem);
+		pr_info("nouveau: core notifier timeout: bo offset 0x%llx +0x%x virt %px iomem %d "
+			"word %08x %08x %08x %08x\n", bo->offset, offset, virt, iomem,
+			nouveau_bo_rd32(bo, offset / 4), nouveau_bo_rd32(bo, offset / 4 + 1),
+			nouveau_bo_rd32(bo, offset / 4 + 2), nouveau_bo_rd32(bo, offset / 4 + 3));
+	}
+#endif
 	return time < 0 ? time : 0;
 }
 

@@ -300,7 +300,11 @@ int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
 	unsigned int max_vecs, unsigned int flags);
 void pci_free_irq_vectors(struct pci_dev *dev);
 int pci_irq_vector(struct pci_dev *dev, unsigned int nr);
-#define pci_enable_msi(dev)		pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI)
+/* 0 on success, as Linux's (pci_alloc_irq_vectors() returns the count):
+ * nouveau took the 1 for a failure and used INTx, which MSI had disabled */
+#define pci_enable_msi(dev) ({ \
+	int __count = pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_MSI); \
+	__count < 0 ? __count : 0; })
 #define pci_disable_msi(dev)	pci_free_irq_vectors(dev)
 #define pci_dev_msi_enabled(dev)	((dev)->msi_enabled || (dev)->msix_enabled)
 #define pci_msix_vec_count(dev)	lx_pci_msix_vec_count(dev)

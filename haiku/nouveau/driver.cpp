@@ -1224,6 +1224,11 @@ self_test_requested()
 static void
 apply_settings()
 {
+	// The KMS accelerant uses the atomic interface, which nouveau offers only
+	// with "atomic 1" (its NV50 and newer display code is atomic inside);
+	// the settings may still turn it off.
+	lx_glue_set_param("atomic", "1");
+
 	void* handle = load_driver_settings(DRIVER_NAME);
 	if (handle == NULL)
 		return;
