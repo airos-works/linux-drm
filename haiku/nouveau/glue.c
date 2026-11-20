@@ -32,6 +32,8 @@
 #include <drm/ttm/ttm_resource.h>
 
 #include "nouveau_drv.h"
+#include "nouveau_bo.h"
+#include "nouveau_gem.h"
 #include "userptr.h"
 
 #include "glue.h"
@@ -126,6 +128,10 @@ static void lx_glue_console_moved(void);
 static void *console_base;
 static int console_width, console_height, console_pitch;
 static struct drm_device *console_device;
+/* the buffer the console is in (a reference), and how near its screen is
+   to the desktop's top left */
+static struct nouveau_bo *console_bo;
+static int console_distance = INT_MAX;
 
 int
 lx_glue_set_param(const char *name, const char *value)
@@ -321,12 +327,17 @@ lx_glue_uninit(void)
 		kthread_stop(watchdog_thread);
 		watchdog_thread = NULL;
 	}
-	/* amdgpu's mapping of the VRAM goes away */
+	/* the console's frame buffer goes away */
 	if (console_base != NULL) {
 		lx_haiku_debug_console(NULL, 0, 0, 0);
 		console_base = NULL;
 	}
+	if (console_bo != NULL) {
+		drm_gem_object_put(&console_bo->bo.base);
+		console_bo = NULL;
+	}
 	console_device = NULL;
+	console_distance = INT_MAX;
 	lx_glue_fake_device_stop();
 	while (probed_count > 0) {
 		struct pci_dev *pdev = probed[--probed_count];
@@ -501,10 +512,17 @@ lx_glue_watchdog_start(void)
 
 /* #pragma mark - the kernel debugger's console */
 
-/* not on nouveau yet: the kernel debugger draws into the firmware's frame
- * buffer, which the screen no longer shows after the first mode set */
+/* Haiku draws the kernel debugger into the frame buffer the boot loader
+ * found, which goes when nouveau takes its GPU over (compat's
+ * aperture_remove_conflicting_pci_devices()). So after every mode set, the
+ * frame buffer the screen at the desktop's top left shows becomes the
+ * console, through nouveau's kernel mapping of it (BAR1, write-combined); the
+ * console keeps a reference to that buffer. With two GPUs, the one whose
+ * screen is nearest the top left wins.
+ * "haiku_console_connector DP-1" puts it on that connector's screen. */
 static char *haiku_console_connector;
 module_param(haiku_console_connector, charp, 0644);
+/* lab aid: "haiku_console_test 1" paints a mark where the console is */
 static int haiku_console_test;
 module_param(haiku_console_test, int, 0644);
 
@@ -512,18 +530,120 @@ module_param(haiku_console_test, int, 0644);
 static void
 lx_glue_update_debug_console(struct drm_device *dev)
 {
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_plane *plane;
+	struct nouveau_bo *best_bo = NULL;
+	u64 best_offset = 0;
+	int width = 0, height = 0, pitch = 0, best = INT_MAX;
+	int ret;
+
+	drm_modeset_acquire_init(&ctx, 0);
+retry:
+	ret = drm_modeset_lock_all_ctx(dev, &ctx);
+	if (ret == -EDEADLK) {
+		drm_modeset_backoff(&ctx);
+		goto retry;
+	}
+	if (ret == 0) {
+		drm_for_each_plane(plane, dev) {
+			struct drm_plane_state *state = plane->state;
+			struct drm_framebuffer *fb;
+			struct nouveau_bo *nvbo;
+			int x, y, w, h, distance;
+
+			if (plane->type != DRM_PLANE_TYPE_PRIMARY || state == NULL
+				|| state->fb == NULL || state->crtc == NULL
+				|| !state->crtc->state->active)
+				continue;
+			fb = state->fb;
+			if (fb->format->cpp[0] != 4 || fb->obj[0] == NULL)
+				continue;
+			nvbo = nouveau_gem_object(fb->obj[0]);
+			if (nvbo->bo.pin_count == 0 || nvbo->bo.resource == NULL
+				|| nvbo->bo.resource->mem_type != TTM_PL_VRAM)
+				continue;
+			x = state->src_x >> 16;
+			y = state->src_y >> 16;
+			w = state->src_w >> 16;
+			h = state->src_h >> 16;
+			if (w <= 0 || h <= 0)
+				continue;
+			distance = x + y;
+			if (haiku_console_connector != NULL && haiku_console_connector[0]) {
+				struct drm_connector *connector;
+				struct drm_connector_list_iter iter;
+				drm_connector_list_iter_begin(dev, &iter);
+				drm_for_each_connector_iter(connector, &iter) {
+					if (connector->state != NULL
+						&& connector->state->crtc == state->crtc
+						&& strcmp(connector->name, haiku_console_connector) == 0)
+						distance = -1;
+				}
+				drm_connector_list_iter_end(&iter);
+			}
+			if (distance >= best)
+				continue;
+			best = distance;
+			best_bo = nvbo;
+			best_offset = fb->offsets[0] + (u64)y * fb->pitches[0] + (u64)x * 4;
+			width = w;
+			height = h;
+			pitch = fb->pitches[0];
+		}
+		/* another GPU's screen nearer the top left keeps the console */
+		if (best_bo != NULL && (console_device == NULL || console_device == dev
+				|| best <= console_distance)) {
+			void *base = NULL;
+			if (best_bo->kmap.virtual == NULL)
+				nouveau_bo_map(best_bo);
+			if (best_bo->kmap.virtual != NULL)
+				base = (u8 *)best_bo->kmap.virtual + best_offset;
+			if (base != NULL && (base != console_base || width != console_width
+					|| height != console_height || pitch != console_pitch)) {
+				struct nouveau_bo *previous = console_bo;
+				drm_gem_object_get(&best_bo->bo.base);
+				console_bo = best_bo;
+				console_base = base;
+				console_width = width;
+				console_height = height;
+				console_pitch = pitch;
+				console_device = dev;
+				console_distance = best;
+				lx_haiku_debug_console(base, width, height, pitch);
+				pr_info("nouveau_drm: kernel debugger console %dx%d on %s\n",
+					width, height, dev_name(dev->dev));
+				if (previous != NULL)
+					drm_gem_object_put(&previous->bo.base);
+			}
+		}
+	}
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
 }
 
 
 static void
 lx_glue_console_moved(void)
 {
+	if (console_device != NULL) {
+		console_distance = INT_MAX;
+		lx_glue_update_debug_console(console_device);
+	}
 }
 
 
 static void
 lx_glue_console_test(void)
 {
+	int x, y;
+	if (console_base == NULL)
+		return;
+	for (y = 0; y < 64 && y < console_height; y++) {
+		u32 *pixel = (u32 *)((u8 *)console_base + (size_t)y * console_pitch);
+		for (x = 0; x < 64 && x < console_width; x++)
+			pixel[x] = ((x / 32 + y / 32) & 1) ? 0xffff00ff : 0xff00ffff;
+	}
+	pr_info("nouveau_drm: marked the kernel debugger console\n");
 }
 
 
