@@ -31,8 +31,11 @@ ADDON_NAME := amdxdna
 OUT ?= $(ROOT)/out-xdna
 else ifeq ($(KIND),nouveau)
 DRIVER := $(ROOT)/haiku/nouveau
-ADDON_NAME := nouveau_drm
-OUT ?= $(ROOT)/out-nouveau
+# LAB=1: a second copy beside the running driver, for one GPU the running
+# one does not drive (settings "haiku_gpus"), with its nodes in /dev/dri/lab
+# and none in /dev/graphics (haiku/nouveau/driver.cpp)
+ADDON_NAME := $(if $(LAB),nouveau_lab,nouveau_drm)
+OUT ?= $(ROOT)/out-nouveau$(if $(LAB),-lab)
 else
 DRIVER := $(ROOT)/haiku/amdgpu
 ADDON_NAME := amdgpu_drm
@@ -63,7 +66,8 @@ GCC_SYSLIBS := $(firstword $(wildcard $(HAIKU_BUILD)/build_packages/gcc_syslibs_
 ADDON := $(OUT)/$(ADDON_NAME)
 
 # Lab builds: make ... ARMED_ONLY=1 (see driver.cpp)
-HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY -DNOUVEAU_DRM_ARMED_ONLY)
+HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY -DNOUVEAU_DRM_ARMED_ONLY) \
+	$(if $(LAB),-DNOUVEAU_LAB)
 
 # Call trace builds (see compat/src/trace.c), best into their own OUT:
 #   make ... OUT=out-trace TRACE_CALLS="drivers/gpu/drm/ttm/ttm_bo.c ..."

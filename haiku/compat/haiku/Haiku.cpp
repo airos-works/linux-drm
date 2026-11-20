@@ -19,6 +19,7 @@
 #include <condition_variable.h>
 #include <cpu.h>
 #include <debug.h>
+#include <boot_item.h>
 #include <frame_buffer_console.h>
 #include <kernel.h>
 #include <lock.h>
@@ -545,6 +546,36 @@ extern "C" void
 lx_haiku_rwlock_write_unlock(void* storage)
 {
 	rw_lock_write_unlock((rw_lock*)storage);
+}
+
+
+/*!	The firmware's frame buffer (the boot loader's, which the kernel
+	debugger's console and the framebuffer driver use), when it lies in
+	[\a start, \a end): the console stops drawing into it and its mapping
+	goes, as Linux removes efifb before a GPU driver takes over. The mapping
+	is write-combined; a GPU driver mapping other parts of the same aperture
+	differently (nouveau's uncached USERD in BAR1) would be refused while it
+	overlaps. Returns whether it was there. */
+extern "C" int
+lx_haiku_remove_boot_frame_buffer(unsigned long long start,
+	unsigned long long end)
+{
+	frame_buffer_boot_info* info = (frame_buffer_boot_info*)get_boot_item(
+		FRAME_BUFFER_BOOT_INFO, NULL);
+	if (info == NULL || info->area < 0)
+		return 0;
+	unsigned long long physical = info->physical_frame_buffer;
+	if (physical < start || physical >= end)
+		return 0;
+	dprintf("linux compat: the firmware's frame buffer at %#llx goes (its GPU "
+		"is driven now); the kernel debugger draws no more until a mode is "
+		"set\n", physical);
+	frame_buffer_update(0, 0, 0, 32, 0);
+	area_id area = info->area;
+	info->area = -1;
+	info->frame_buffer = 0;
+	delete_area(area);
+	return 1;
 }
 
 

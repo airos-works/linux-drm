@@ -79,7 +79,13 @@ __asm__(".type device_manager_add_power_hook, @function\n"
 static const uint32 kPowerHookDeepSleep = 0x01;
 
 
-#define DRIVER_NAME "nouveau_drm"
+#define DRIVER_NAME LX_DRIVER_NAME
+// a lab copy beside the running driver keeps its nodes apart (Makefile LAB=1)
+#ifdef NOUVEAU_LAB
+#	define DRI_DIR "dri/lab"
+#else
+#	define DRI_DIR "dri"
+#endif
 #define TRACE(x...) dprintf(DRIVER_NAME ": " x)
 
 // the synced log file (log_file), and the syslog
@@ -816,7 +822,7 @@ device_free(void* _cookie)
 // While the GPUs sleep (suspend to idle), DRM calls wait at the door; the
 // ones under way get a while to finish before the GPUs go to sleep. (Linux
 // freezes every task first; Haiku's keep running.)
-static mutex sSleepLock = MUTEX_INITIALIZER("nouveau_drm sleep");
+static mutex sSleepLock = MUTEX_INITIALIZER(DRIVER_NAME " sleep");
 static ConditionVariable sSleepCondition;
 static bool sSleeping;
 static int32 sCallsUnderway;
@@ -1303,7 +1309,7 @@ sync_volumes()
 	option. A stale arm file is deleted. */
 #ifdef NOUVEAU_DRM_ARMED_ONLY
 static const char* kArmFile
-	= "/boot/home/config/settings/kernel/drivers/nouveau_drm.arm";
+	= "/boot/home/config/settings/kernel/drivers/" DRIVER_NAME ".arm";
 
 static bool
 armed_for_this_boot()
@@ -1343,7 +1349,7 @@ armed_for_this_boot()
 	file system then (see sync_volumes()). The next start keeps it, and its
 	stable timer deletes it. */
 static const char* kStartMarker
-	= "/boot/home/config/settings/kernel/drivers/nouveau_drm.starting";
+	= "/boot/home/config/settings/kernel/drivers/" DRIVER_NAME ".starting";
 static const char kUnfinishedLabel[] = "unfinished starts: ";
 static const int kMaxUnfinishedStarts = 2;
 static const bigtime_t kStableAfter = 30000000;
@@ -1406,7 +1412,7 @@ mark_start()
 		return;
 	}
 	char text[160];
-	int length = snprintf(text, sizeof(text), "nouveau_drm was starting; "
+	int length = snprintf(text, sizeof(text), DRIVER_NAME " was starting; "
 		"delete this file to let it start again\n%s%d\n", kUnfinishedLabel,
 		sUnfinishedStarts + 1);
 	_kern_write(fd, 0, text, min_c(length, (int)sizeof(text) - 1));
@@ -1433,10 +1439,10 @@ stable_thread(void*)
 static void
 start_stable_timer()
 {
-	sStableSem = create_sem(0, "nouveau_drm stable");
+	sStableSem = create_sem(0, DRIVER_NAME " stable");
 	if (sStableSem < 0)
 		return;
-	sStableThread = spawn_kernel_thread(stable_thread, "nouveau_drm stable",
+	sStableThread = spawn_kernel_thread(stable_thread, DRIVER_NAME " stable",
 		B_LOW_PRIORITY, NULL);
 	if (sStableThread >= 0)
 		resume_thread(sStableThread);
@@ -1480,17 +1486,17 @@ pin_thread(void*)
 	// devfs publishes the devices once init_driver() returned
 	int fd = B_ENTRY_NOT_FOUND;
 	for (int attempt = 0; attempt < 500; attempt++) {
-		fd = _kern_open(-1, "/dev/dri/renderD128", O_RDWR, 0);
+		fd = _kern_open(-1, "/dev/" DRI_DIR "/renderD128", O_RDWR, 0);
 		if (fd >= 0 || fd != B_ENTRY_NOT_FOUND)
 			break;
 		snooze(20000);
 	}
 	if (fd < 0) {
-		TRACE("cannot keep /dev/dri/renderD128 open: %s\n", strerror(fd));
+		TRACE("cannot keep /dev/" DRI_DIR "/renderD128 open: %s\n", strerror(fd));
 		return B_OK;
 	}
 	sPinFile = fd;
-	TRACE("keeping /dev/dri/renderD128 open: devfs does not reload a running "
+	TRACE("keeping /dev/" DRI_DIR "/renderD128 open: devfs does not reload a running "
 		"GPU's driver\n");
 	return B_OK;
 }
@@ -1513,7 +1519,7 @@ unpin_thread(void*)
 static void
 lab_unpin()
 {
-	thread_id thread = spawn_kernel_thread(unpin_thread, "nouveau_drm unpin",
+	thread_id thread = spawn_kernel_thread(unpin_thread, DRIVER_NAME " unpin",
 		B_NORMAL_PRIORITY, NULL);
 	if (thread >= 0) {
 		resume_thread(thread);
@@ -1680,12 +1686,13 @@ init_driver(void)
 	for (int i = 0; i < count; i++) {
 		char name[32];
 		if (minors[i] >= 128)
-			snprintf(name, sizeof(name), "dri/renderD%d", minors[i]);
+			snprintf(name, sizeof(name), DRI_DIR "/renderD%d", minors[i]);
 		else
-			snprintf(name, sizeof(name), "dri/card%d", minors[i]);
+			snprintf(name, sizeof(name), DRI_DIR "/card%d", minors[i]);
 		sDeviceNames[sDeviceCount] = strdup(name);
 		sDeviceMinors[sDeviceCount] = minors[i];
 		sDeviceCount++;
+#ifndef NOUVEAU_LAB
 		if (minors[i] < 128) {
 			// app_server looks for displays in /dev/graphics only: the same
 			// primary node there, which names the KMS accelerant
@@ -1694,6 +1701,7 @@ init_driver(void)
 			sDeviceMinors[sDeviceCount] = minors[i];
 			sDeviceCount++;
 		}
+#endif
 	}
 	sDeviceNames[sDeviceCount] = NULL;
 	TRACE("%d GPU(s), %d device(s)\n", gpus, sDeviceCount);
@@ -1701,7 +1709,7 @@ init_driver(void)
 		&& register_shutdown_hook(&shutdown_gpus, NULL) == B_OK) {
 		sShutdownHookRegistered = true;
 	}
-	sSleepCondition.Init(&sSleepCondition, "nouveau_drm sleep");
+	sSleepCondition.Init(&sSleepCondition, DRIVER_NAME " sleep");
 	if (device_manager_add_power_hook_etc != NULL) {
 		sPowerHookRegistered = device_manager_add_power_hook_etc(&power_hook,
 			NULL, DRIVER_NAME, kPowerHookDeepSleep) == B_OK;
@@ -1710,7 +1718,7 @@ init_driver(void)
 			NULL, DRIVER_NAME) == B_OK;
 	}
 	// after publish_devices(), which follows init_driver()
-	thread_id pin = spawn_kernel_thread(pin_thread, "nouveau_drm pin",
+	thread_id pin = spawn_kernel_thread(pin_thread, DRIVER_NAME " pin",
 		B_NORMAL_PRIORITY, NULL);
 	if (pin >= 0)
 		resume_thread(pin);

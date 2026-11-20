@@ -618,7 +618,15 @@ struct fb_cmap;
 /* EFI, firmware frame buffers */
 #define efi_enabled(f)		false
 #define EFI_BOOT			0
+#ifdef LX_ADDON_NOUVEAU
+/* the firmware's frame buffer goes when it lies in one of the GPU's
+   apertures (compat/src/pci.c) */
+struct pci_dev;
+int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev,
+	const char *name);
+#else
 #define aperture_remove_conflicting_pci_devices(pdev, name)	0
+#endif
 #define aperture_remove_conflicting_devices(base, size, name)	0
 #define video_firmware_drivers_only()	false
 #define screen_info_pci_dev(si)	NULL

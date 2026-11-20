@@ -909,3 +909,29 @@ lx_pci_match(struct pci_driver *driver, struct pci_dev *dev)
 	}
 	return NULL;
 }
+
+
+#ifdef LX_ADDON_NOUVEAU
+int lx_haiku_remove_boot_frame_buffer(unsigned long long start,
+	unsigned long long end);
+
+/* Linux removes the firmware's frame buffer driver (efifb) from the GPU's
+ * apertures before its driver takes the GPU over; here the kernel's mapping
+ * of it goes (Haiku.cpp). */
+int
+aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *name)
+{
+	int bar;
+	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+		resource_size_t start = pci_resource_start(pdev, bar);
+		resource_size_t length = pci_resource_len(pdev, bar);
+		if ((pci_resource_flags(pdev, bar) & IORESOURCE_MEM) == 0
+			|| length == 0)
+			continue;
+		if (lx_haiku_remove_boot_frame_buffer(start, start + length))
+			pr_info("%s: firmware frame buffer removed from BAR %d of %s\n",
+				name, bar, pci_name(pdev));
+	}
+	return 0;
+}
+#endif
