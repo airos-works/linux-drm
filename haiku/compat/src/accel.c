@@ -5,7 +5,7 @@
 
 /*	What the AMD NPU driver needs beyond the GPU drivers (lx/accel.h):
 	managed BAR mappings and page runs, the files of dma-buf's pseudo file
-	system, and SRCU with a reader count per srcu_struct. */
+	system. (SRCU, a reader count per srcu_struct, is lx/lock.h's.) */
 
 #include <lx/haiku.h>
 
@@ -196,38 +196,5 @@ lx_alloc_file_pseudo(struct inode *inode, struct vfsmount *mount,
 	return file;
 }
 
-
-/* #pragma mark - SRCU */
-
-
-int
-lx_srcu_read_lock(struct srcu_struct *srcu)
-{
-	__atomic_add_fetch(&srcu->readers, 1, __ATOMIC_SEQ_CST);
-	return 0;
-}
-
-
-void
-lx_srcu_read_unlock(struct srcu_struct *srcu)
-{
-	__atomic_sub_fetch(&srcu->readers, 1, __ATOMIC_SEQ_CST);
-}
-
-
-/*	Returns once no reader was in a read side: every reader that began
-	before the call has ended then. Readers may sleep for long, so this
-	sleeps between looks. */
-void
-lx_synchronize_srcu(struct srcu_struct *srcu)
-{
-	int spins = 0;
-	while (__atomic_load_n(&srcu->readers, __ATOMIC_SEQ_CST) != 0) {
-		if (++spins < 100)
-			cpu_relax();
-		else
-			lx_haiku_snooze(spins < 1000 ? 20 : 1000);
-	}
-}
 
 #endif	/* LX_ADDON_AMDXDNA */

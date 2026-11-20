@@ -474,6 +474,47 @@ synchronize_rcu(void)
 }
 
 
+/* #pragma mark - SRCU (see lx/lock.h) */
+
+int
+lx_srcu_read_lock(struct srcu_struct *srcu)
+{
+	int index = (int)(__atomic_load_n(&srcu->index, __ATOMIC_SEQ_CST) & 1);
+	__atomic_add_fetch(&srcu->readers[index], 1, __ATOMIC_SEQ_CST);
+	return index;
+}
+
+
+void
+lx_srcu_read_unlock(struct srcu_struct *srcu, int index)
+{
+	__atomic_sub_fetch(&srcu->readers[index & 1], 1, __ATOMIC_SEQ_CST);
+}
+
+
+static DEFINE_MUTEX(srcu_sync_lock);
+
+void
+lx_synchronize_srcu(struct srcu_struct *srcu)
+{
+	int pass;
+
+	mutex_lock(&srcu_sync_lock);
+	for (pass = 0; pass < 2; pass++) {
+		unsigned long old = __atomic_fetch_add(&srcu->index, 1,
+			__ATOMIC_SEQ_CST) & 1;
+		int spins = 0;
+		while (__atomic_load_n(&srcu->readers[old], __ATOMIC_SEQ_CST) != 0) {
+			if (++spins < 100)
+				cpu_relax();
+			else
+				lx_haiku_snooze(spins < 1000 ? 20 : 1000);
+		}
+	}
+	mutex_unlock(&srcu_sync_lock);
+}
+
+
 static DEFINE_SPINLOCK(rcu_lock);
 static struct rcu_head *rcu_queue;
 static struct rcu_head **rcu_queue_tail = &rcu_queue;

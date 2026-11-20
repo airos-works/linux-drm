@@ -447,7 +447,6 @@ void lx_rcu_read_unlock(void);
 #define rcu_read_lock_sched_held()	1
 void synchronize_rcu(void);
 #define synchronize_rcu_expedited()	synchronize_rcu()
-#define synchronize_srcu(s)			synchronize_rcu()
 #define synchronize_rcu_tasks()		synchronize_rcu()
 #define synchronize_net()			synchronize_rcu()
 typedef void (*rcu_callback_t)(struct rcu_head *head);
@@ -488,14 +487,24 @@ void lx_kfree_rcu(void *object, struct rcu_head *head);
 #define rcu_lockdep_assert(c, s) do { } while (0)
 DEFINE_LOCK_GUARD_0(rcu, rcu_read_lock(), rcu_read_unlock())
 
-/* SRCU: the same as RCU */
-struct srcu_struct { int readers; };
+/*	SRCU: readers may sleep (DRM's drm_dev_enter() covers every nouveau
+	ioctl, vertical blank waits too), so they are not RCU's readers, whose
+	count a grace period waits to see at zero: with a thread or two always
+	in an ioctl that never happened, and a DRM file's close waited for ever
+	in synchronize_rcu(). Each srcu_struct counts its own readers, in two
+	counters: synchronize_srcu() sends new readers to the other one and
+	waits for the old one to empty, twice, so that it cannot be starved. */
+struct srcu_struct { long readers[2]; unsigned long index; };
 #define DEFINE_SRCU(name)			struct srcu_struct name
 #define DEFINE_STATIC_SRCU(name)	static struct srcu_struct name
-#define init_srcu_struct(s)			0
+#define init_srcu_struct(s)			({ memset((s), 0, sizeof(*(s))); 0; })
 #define cleanup_srcu_struct(s)		do { } while (0)
-#define srcu_read_lock(s)			({ lx_rcu_read_lock(); 0; })
-#define srcu_read_unlock(s, idx)	lx_rcu_read_unlock()
+int lx_srcu_read_lock(struct srcu_struct *srcu);
+void lx_srcu_read_unlock(struct srcu_struct *srcu, int index);
+void lx_synchronize_srcu(struct srcu_struct *srcu);
+#define srcu_read_lock(s)			lx_srcu_read_lock(s)
+#define srcu_read_unlock(s, idx)	lx_srcu_read_unlock((s), (idx))
+#define synchronize_srcu(s)			lx_synchronize_srcu(s)
 
 /* #pragma mark - reference counts with locks */
 

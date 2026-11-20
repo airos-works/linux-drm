@@ -215,23 +215,4 @@ struct file *lx_alloc_file_pseudo(struct inode *inode, struct vfsmount *mount,
 	lx_alloc_file_pseudo(inode, mount, name, flags, fops)
 #endif
 
-
-/* #pragma mark - SRCU */
-
-/*	The NPU driver sleeps in SRCU read sides (it waits for a command there),
-	which the reader count all of RCU shares (lx/lock.h) must not see: every
-	grace period would wait for the command. Here each srcu_struct counts its
-	own readers. */
-#ifdef LX_ADDON_AMDXDNA
-#undef srcu_read_lock
-#undef srcu_read_unlock
-#undef synchronize_srcu
-int lx_srcu_read_lock(struct srcu_struct *srcu);
-void lx_srcu_read_unlock(struct srcu_struct *srcu);
-void lx_synchronize_srcu(struct srcu_struct *srcu);
-#define srcu_read_lock(s)			lx_srcu_read_lock(s)
-#define srcu_read_unlock(s, idx)	((void)(idx), lx_srcu_read_unlock(s))
-#define synchronize_srcu(s)			lx_synchronize_srcu(s)
-#endif
-
 #endif /* _LX_ACCEL_H */
