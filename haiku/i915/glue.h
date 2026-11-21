@@ -20,6 +20,8 @@ void lx_glue_uninit(void);
 void lx_glue_shutdown(void);
 int lx_glue_suspend(void);
 void lx_glue_resume(void);
+int lx_glue_suspend_deep(void);
+void lx_glue_resume_deep(void);
 
 int lx_glue_minors(int *minors, int max);
 int lx_glue_minor_location(int minor, int *bus, int *device, int *function);

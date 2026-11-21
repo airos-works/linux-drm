@@ -894,6 +894,7 @@ open_door()
 
 
 static bool sGPUsSleeping;
+static bool sGPUsSuspendedToRAM;
 
 
 /*!	Suspend to idle (state 0, ACPI_POWER_STATE_ON) puts the APUs' GPUs to
@@ -905,8 +906,18 @@ static status_t
 power_hook(void* cookie, bool resume, int32 state)
 {
 	if (!resume) {
-		if (state != 0)
+		if (state != 0) {
+			// suspend to RAM: the GPU loses its power and i915 has to
+			// bring the display up again afterwards
+			close_door();
+			int result = lx_glue_suspend_deep();
+			if (result <= 0) {
+				open_door();
+				return haiku_status(result);
+			}
+			sGPUsSuspendedToRAM = true;
 			return B_OK;
+		}
 
 		close_door();
 		int result = lx_glue_suspend();
@@ -918,6 +929,13 @@ power_hook(void* cookie, bool resume, int32 state)
 		return B_OK;
 	}
 
+	if (sGPUsSuspendedToRAM) {
+		lx_haiku_suspend_trace(true);
+		lx_glue_resume_deep();
+		lx_haiku_suspend_trace(false);
+		sGPUsSuspendedToRAM = false;
+		open_door();
+	}
 	if (sGPUsSleeping) {
 		lx_haiku_suspend_trace(true);
 		lx_glue_resume();

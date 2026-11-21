@@ -32,6 +32,7 @@
 #include <drm/ttm/ttm_resource.h>
 
 #include "i915_drv.h"
+#include "i915_driver.h"
 #include "gem/i915_gem_object.h"
 #include "userptr.h"
 #include "stubs.h"
@@ -312,6 +313,78 @@ lx_glue_suspend(void)
 void
 lx_glue_resume(void)
 {
+}
+
+
+/* Suspend to RAM (S3) powers the GPU off: it comes back without its display
+ * clocks, power wells, PLLs and link, which only i915 can bring up again.
+ * Linux' system sleep path: prepare, suspend and suspend_late before, and
+ * resume_early, resume and complete after (i915_pm_ops). The compat
+ * acpi_target_system_state() is 0, but CONFIG_ACPI_SLEEP is off, so i915
+ * takes every system sleep for S3 (suspend_to_idle() false). */
+static bool deep_suspended[MAX_GPUS];
+
+int
+lx_glue_suspend_deep(void)
+{
+	int i, count = 0;
+
+	for (i = 0; i < probed_count; i++) {
+		struct pci_dev *pdev = probed[i];
+		struct device *kdev = &pdev->dev;
+		int r;
+
+		if (drm_device_of(pdev) == NULL)
+			continue;
+
+		pr_info("i915: suspending %s to RAM\n", pci_name(pdev));
+		r = i915_pm_ops.prepare(kdev);
+		if (r == 0) {
+			r = i915_pm_ops.suspend(kdev);
+			if (r == 0) {
+				r = i915_pm_ops.suspend_late(kdev);
+				if (r != 0)
+					i915_pm_ops.resume(kdev);
+			}
+			if (r != 0)
+				i915_pm_ops.complete(kdev);
+		}
+		if (r != 0) {
+			pr_err("i915: suspending %s failed: %d\n", pci_name(pdev), r);
+			lx_glue_resume_deep();
+			return r;
+		}
+		deep_suspended[i] = true;
+		count++;
+	}
+	return count;
+}
+
+
+void
+lx_glue_resume_deep(void)
+{
+	int i;
+
+	for (i = 0; i < probed_count; i++) {
+		struct pci_dev *pdev = probed[i];
+		struct device *kdev = &pdev->dev;
+		int r;
+
+		if (!deep_suspended[i])
+			continue;
+		deep_suspended[i] = false;
+
+		pr_info("i915: resuming %s from RAM\n", pci_name(pdev));
+		r = i915_pm_ops.resume_early(kdev);
+		if (r != 0)
+			pr_err("i915: early resume of %s: %d\n", pci_name(pdev), r);
+		r = i915_pm_ops.resume(kdev);
+		if (r != 0)
+			pr_err("i915: resuming %s failed: %d\n", pci_name(pdev), r);
+		i915_pm_ops.complete(kdev);
+		pr_info("i915: %s resumed\n", pci_name(pdev));
+	}
 }
 
 
