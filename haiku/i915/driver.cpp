@@ -1238,6 +1238,8 @@ static int sSelfTest;
 /* settings: "haiku_gpus 04:00.0,..." limits the driver to those GPUs (lab
    use) */
 static char sOnlyGpus[128];
+// "haiku_probe all": every Gen 9 and later GPU, not just Gen 9's big cores
+static bool sProbeAll;
 
 
 /* 0: none, 1: test the compat layer and stop, 2: also run a fake DRM device */
@@ -1269,6 +1271,11 @@ apply_settings()
 			strlcpy(sOnlyGpus, parameter.values[0], sizeof(sOnlyGpus));
 			continue;
 		}
+		if (strcmp(parameter.name, "haiku_probe") == 0) {
+			sProbeAll = parameter.value_count > 0
+				&& strcmp(parameter.values[0], "all") == 0;
+			continue;
+		}
 		if (parameter.value_count > 0
 			&& strcmp(parameter.name, "haiku_selftest") != 0)
 			lx_glue_set_param(parameter.name, parameter.values[0]);
@@ -1277,27 +1284,45 @@ apply_settings()
 }
 
 
-/*	Intel GPUs from Gen 9 on (Skylake, Kaby Lake, Coffee Lake, Comet Lake,
-	Gemini Lake, Broxton, and Gen 11 and 12: Ice Lake, Tiger Lake, Alder
-	Lake ...): i915 drives them as on Linux. Older ones stay with Haiku's
-	intel_extreme here: Valleyview and Cherryview need the IOSF sideband
-	and GPUs before Sandy Bridge AGP's intel-gtt, neither of which this
-	add-on has, and Gen 6 to 8 have not been tried. Haiku's own
-	intel_extreme leaves the GPUs this driver takes alone when it is
-	installed (its i915_drm check). "haiku_gpus 00:02.0,..." limits the
-	driver to some GPUs. */
+/*	The Intel GPUs this driver takes: by default Gen 9's big cores
+	(Skylake, Kaby Lake, Amber Lake, Coffee Lake, Whiskey Lake, Comet Lake),
+	whose code paths the 2017 iMac's Kaby Lake GT3e proved; with
+	"haiku_probe all" in the settings every Gen 9 and later GPU i915 knows
+	(Broxton, Gemini Lake, Ice Lake, Jasper/Elkhart Lake, Tiger Lake, Rocket
+	Lake, Alder/Raptor Lake, Meteor Lake, DG1, DG2), not tried on hardware
+	yet. Older ones stay with Haiku's intel_extreme: Valleyview and
+	Cherryview need the IOSF sideband and GPUs before Sandy Bridge AGP's
+	intel-gtt, neither of which this add-on has. intel_extreme leaves the
+	GPUs this driver takes alone while it is installed and has not given up
+	(its i915_drm check reads the same settings and start marker).
+	"haiku_gpus 00:02.0,..." limits the driver to some GPUs. */
 
-static const uint16 kGen9AndLaterIds[] = {
 #define LX_ID(id, ...)	id
-	INTEL_SKL_IDS(LX_ID), INTEL_BXT_IDS(LX_ID), INTEL_GLK_IDS(LX_ID),
-	INTEL_KBL_IDS(LX_ID), INTEL_CFL_IDS(LX_ID), INTEL_WHL_IDS(LX_ID),
-	INTEL_CML_IDS(LX_ID), INTEL_ICL_IDS(LX_ID), INTEL_EHL_IDS(LX_ID),
+static const uint16 kGen9CoreIds[] = {
+	INTEL_SKL_IDS(LX_ID), INTEL_KBL_IDS(LX_ID), INTEL_CFL_IDS(LX_ID),
+	INTEL_WHL_IDS(LX_ID), INTEL_CML_IDS(LX_ID),
+};
+static const uint16 kGen9AndLaterIds[] = {
+	INTEL_BXT_IDS(LX_ID), INTEL_GLK_IDS(LX_ID),
+	INTEL_ICL_IDS(LX_ID), INTEL_EHL_IDS(LX_ID),
 	INTEL_JSL_IDS(LX_ID), INTEL_TGL_IDS(LX_ID), INTEL_RKL_IDS(LX_ID),
 	INTEL_ADLS_IDS(LX_ID), INTEL_ADLP_IDS(LX_ID), INTEL_ADLN_IDS(LX_ID),
 	INTEL_RPLS_IDS(LX_ID), INTEL_RPLU_IDS(LX_ID), INTEL_RPLP_IDS(LX_ID),
 	INTEL_MTL_IDS(LX_ID), INTEL_DG1_IDS(LX_ID), INTEL_DG2_IDS(LX_ID),
-#undef LX_ID
 };
+#undef LX_ID
+
+
+
+static bool
+listed(const uint16* ids, size_t count, uint16 id)
+{
+	for (size_t i = 0; i < count; i++) {
+		if (ids[i] == id)
+			return true;
+	}
+	return false;
+}
 
 
 static bool
@@ -1305,14 +1330,9 @@ is_i915_gpu(const pci_info& info)
 {
 	if (info.vendor_id != 0x8086 || info.class_base != PCI_display)
 		return false;
-	bool known = false;
-	for (size_t i = 0; i < B_COUNT_OF(kGen9AndLaterIds); i++) {
-		if (kGen9AndLaterIds[i] == info.device_id) {
-			known = true;
-			break;
-		}
-	}
-	if (!known)
+	if (!listed(kGen9CoreIds, B_COUNT_OF(kGen9CoreIds), info.device_id)
+		&& (!sProbeAll || !listed(kGen9AndLaterIds,
+			B_COUNT_OF(kGen9AndLaterIds), info.device_id)))
 		return false;
 	if (sOnlyGpus[0] == '\0')
 		return true;
@@ -1580,9 +1600,28 @@ lab_unpin()
 #endif
 
 
+/*	haiku_probe and haiku_gpus, which init_hardware() needs before the
+	Linux parameters are applied */
+static void
+read_gpu_settings()
+{
+	void* handle = load_driver_settings(DRIVER_NAME);
+	if (handle == NULL)
+		return;
+	const char* probe = get_driver_parameter(handle, "haiku_probe", NULL,
+		NULL);
+	sProbeAll = probe != NULL && strcmp(probe, "all") == 0;
+	const char* gpus = get_driver_parameter(handle, "haiku_gpus", NULL, NULL);
+	if (gpus != NULL)
+		strlcpy(sOnlyGpus, gpus, sizeof(sOnlyGpus));
+	unload_driver_settings(handle);
+}
+
+
 status_t
 init_hardware(void)
 {
+	read_gpu_settings();
 
 	pci_module_info* pci;
 	if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) != B_OK)
