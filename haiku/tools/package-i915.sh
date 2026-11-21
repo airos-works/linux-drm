@@ -63,8 +63,9 @@ sources). Its complete source is https://github.com/airos-works/linux-drm at
 commit $commit (COPYING there says which files are under which licence).
 
 It drives the Intel GPUs of Gen 9's big cores (Skylake, Kaby Lake, Amber
-Lake, Coffee Lake, Whiskey Lake, Comet Lake); with "haiku_probe all" in its
-settings every Gen 9 and later GPU i915 knows (not tried on hardware yet).
+Lake, Coffee Lake, Whiskey Lake, Comet Lake) and Gemini Lake; with
+"haiku_probe all" in its settings every Gen 9 and later GPU i915 knows (not
+tried on hardware yet).
 Haiku's intel_extreme leaves those GPUs alone while this driver is installed
 and drives the older ones. It publishes /dev/dri/card<n> and renderD<n> (the
 DRM interface of libdrm, Mesa's iris OpenGL driver, ANV Vulkan and Intel's
@@ -90,7 +91,7 @@ summary			"Linux's i915 driver for Intel GPUs from Gen 9 on"
 description		"i915_drm runs Linux $linuxVersion's i915 and DRM on Haiku: \
 kernel mode setting for app_server (amdgpu_kms), and the DRM interface for \
 OpenGL (Mesa's iris), Vulkan (ANV) and video decoding and encoding \
-(VA-API). Intel Skylake to Comet Lake integrated graphics."
+(VA-API). Intel Skylake to Comet Lake and Gemini Lake integrated graphics."
 packager		"air/OS"
 vendor			"air/OS"
 copyrights		{ "Intel Corporation" "The Linux kernel contributors" "air/OS" }

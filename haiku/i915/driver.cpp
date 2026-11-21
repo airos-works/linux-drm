@@ -1296,9 +1296,9 @@ apply_settings()
 
 /*	The Intel GPUs this driver takes: by default Gen 9's big cores
 	(Skylake, Kaby Lake, Amber Lake, Coffee Lake, Whiskey Lake, Comet Lake),
-	whose code paths the 2017 iMac's Kaby Lake GT3e proved; with
-	"haiku_probe all" in the settings every Gen 9 and later GPU i915 knows
-	(Broxton, Gemini Lake, Ice Lake, Jasper/Elkhart Lake, Tiger Lake, Rocket
+	whose code paths the 2017 iMac's Kaby Lake GT3e proved, and Gemini Lake
+	(the Yoga 11e's UHD 605); with "haiku_probe all" in the settings every
+	Gen 9 and later GPU i915 knows (Broxton/Apollo Lake, Ice Lake, Jasper/Elkhart Lake, Tiger Lake, Rocket
 	Lake, Alder/Raptor Lake, Meteor Lake, DG1, DG2), not tried on hardware
 	yet. Older ones stay with Haiku's intel_extreme: Valleyview and
 	Cherryview need the IOSF sideband and GPUs before Sandy Bridge AGP's
@@ -1310,10 +1310,10 @@ apply_settings()
 #define LX_ID(id, ...)	id
 static const uint16 kGen9CoreIds[] = {
 	INTEL_SKL_IDS(LX_ID), INTEL_KBL_IDS(LX_ID), INTEL_CFL_IDS(LX_ID),
-	INTEL_WHL_IDS(LX_ID), INTEL_CML_IDS(LX_ID),
+	INTEL_WHL_IDS(LX_ID), INTEL_CML_IDS(LX_ID), INTEL_GLK_IDS(LX_ID),
 };
 static const uint16 kGen9AndLaterIds[] = {
-	INTEL_BXT_IDS(LX_ID), INTEL_GLK_IDS(LX_ID),
+	INTEL_BXT_IDS(LX_ID),
 	INTEL_ICL_IDS(LX_ID), INTEL_EHL_IDS(LX_ID),
 	INTEL_JSL_IDS(LX_ID), INTEL_TGL_IDS(LX_ID), INTEL_RKL_IDS(LX_ID),
 	INTEL_ADLS_IDS(LX_ID), INTEL_ADLP_IDS(LX_ID), INTEL_ADLN_IDS(LX_ID),
