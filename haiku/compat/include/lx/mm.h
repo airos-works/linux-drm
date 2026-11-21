@@ -751,7 +751,8 @@ void shmem_truncate_range(struct inode *inode, loff_t start, loff_t end);
 #define mapping_clear_unevictable(mapping)	do { } while (0)
 #define mapping_gfp_mask(mapping)	GFP_KERNEL
 #define mapping_set_gfp_mask(mapping, mask)	do { } while (0)
-#define mapping_gfp_constraint(mapping, gfp)	(gfp)
+/* the mapping's mask limited by \a gfp (i915 passes ~__GFP_RECLAIM) */
+#define mapping_gfp_constraint(mapping, gfp)	(mapping_gfp_mask(mapping) & (gfp))
 #define invalidate_mapping_pages(mapping, start, end)	0UL
 
 /* shrinkers: graphics memory is not reclaimed under memory pressure */
