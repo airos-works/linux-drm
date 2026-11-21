@@ -1260,6 +1260,16 @@ self_test_requested()
 static void
 apply_settings()
 {
+	// Framebuffer compression and panel self refresh show what the display
+	// engine fetched last until the driver hears that the frame buffer
+	// changed: from its own GPU work, or DRM_IOCTL_MODE_DIRTYFB after the
+	// CPU wrote. Haiku's drawing (app_server's CPU copies of small updates,
+	// direct windows) does not say so, and on the iMac small updates (a
+	// selection rectangle, a new window's contents) stayed invisible with
+	// FBC on. Off by default; the settings may turn them on again.
+	lx_glue_set_param("enable_fbc", "0");
+	lx_glue_set_param("enable_psr", "0");
+
 	void* handle = load_driver_settings(DRIVER_NAME);
 	if (handle == NULL)
 		return;
