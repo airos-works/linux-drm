@@ -1241,6 +1241,13 @@ static char sOnlyGpus[128];
 // "haiku_probe all": every Gen 9 and later GPU, not just Gen 9's big cores
 static bool sProbeAll;
 
+/*	Linux's shutdown of an Intel GPU (i915_driver_shutdown) hung the iMac's
+	reboots now and then, past the kernel's shutdown watchdog. An Intel GPU
+	is reset with the rest of the machine and set up again by the firmware,
+	so nothing is lost by leaving it as it is; "haiku_shutdown_gpus true"
+	runs Linux's shutdown again. */
+static bool sShutdownGpus;
+
 
 /* 0: none, 1: test the compat layer and stop, 2: also run a fake DRM device */
 static int
@@ -1624,6 +1631,8 @@ read_gpu_settings()
 	const char* gpus = get_driver_parameter(handle, "haiku_gpus", NULL, NULL);
 	if (gpus != NULL)
 		strlcpy(sOnlyGpus, gpus, sizeof(sOnlyGpus));
+	sShutdownGpus = get_driver_boolean_parameter(handle, "haiku_shutdown_gpus",
+		false, true);
 	unload_driver_settings(handle);
 }
 
@@ -1804,7 +1813,7 @@ init_driver(void)
 	}
 	sDeviceNames[sDeviceCount] = NULL;
 	TRACE("%d GPU(s), %d device(s)\n", gpus, sDeviceCount);
-	if (register_shutdown_hook != NULL
+	if (sShutdownGpus && register_shutdown_hook != NULL
 		&& register_shutdown_hook(&shutdown_gpus, NULL) == B_OK) {
 		sShutdownHookRegistered = true;
 	}
