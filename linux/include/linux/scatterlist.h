@@ -601,7 +601,9 @@ void __sg_page_iter_start(struct sg_page_iter *piter,
  */
 static inline struct page *sg_page_iter_page(struct sg_page_iter *piter)
 {
-	return sg_page(piter->sg) + piter->sg_pgoffset;
+	/* Haiku: struct pages of physically contiguous pages need not be
+	 * contiguous (the compat layer's nth_page()) */
+	return nth_page(sg_page(piter->sg), piter->sg_pgoffset);
 }
 
 /**

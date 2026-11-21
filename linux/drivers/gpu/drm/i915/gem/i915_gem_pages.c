@@ -765,7 +765,9 @@ __i915_gem_object_get_page(struct drm_i915_gem_object *obj, pgoff_t n)
 	GEM_BUG_ON(!i915_gem_object_has_struct_page(obj));
 
 	sg = i915_gem_object_get_sg(obj, n, &offset);
-	return sg_page(sg) + offset;
+	/* Haiku: struct pages of physically contiguous pages need not be
+	 * contiguous (the compat layer's nth_page()) */
+	return nth_page(sg_page(sg), offset);
 }
 
 /* Like i915_gem_object_get_page(), but mark the returned page dirty */

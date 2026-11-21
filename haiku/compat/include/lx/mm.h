@@ -349,6 +349,10 @@ phys_addr_t lx_virt_to_phys(const volatile void *address);
 #define folio_alloc(gfp, order)		page_folio(lx_alloc_pages(gfp, order))
 #define page_to_pfn(page)			((unsigned long)((page)->lx_phys >> PAGE_SHIFT))
 #define pfn_to_page(pfn)			lx_pfn_to_page(pfn)
+/* the page n pages after \a page in physical memory: struct pages are per
+ * allocation here, so physical neighbours from different allocations (an
+ * sg entry coalesced from them) are not neighbours in memory */
+#define nth_page(page, n)	pfn_to_page(page_to_pfn(page) + (n))
 #define page_to_phys(page)			((page)->lx_phys)
 #define phys_to_page(phys)			lx_pfn_to_page((phys) >> PAGE_SHIFT)
 #define pfn_valid(pfn)				(lx_pfn_to_page(pfn) != NULL)
@@ -478,7 +482,14 @@ void lx_flush_page_array(struct page **pages, unsigned long count);
 #define set_memory_rw(addr, n)			0
 #define set_memory_decrypted(addr, n)	0
 #define set_memory_encrypted(addr, n)	0
+#ifdef LX_ADDON_I915
+/* i915: write-combined mappings of buffers into teams (the Haiku driver maps
+ * them with the caching the fault handler asks for); otherwise it maps
+ * dumb buffers through the aperture and refuses I915_MMAP_OFFSET_WC */
+#define pat_enabled()					true
+#else
 #define pat_enabled()					false
+#endif
 #define arch_io_reserve_memtype_wc(start, size)	0
 #define arch_io_free_memtype_wc(start, size)	do { } while (0)
 #define arch_phys_wc_add(base, size)	0
