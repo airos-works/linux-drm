@@ -153,9 +153,18 @@ enum {
 	MEMREMAP_ENC = 1 << 3,
 	MEMREMAP_DEC = 1 << 4,
 };
-#define memremap(offset, size, flags) \
-	((void *)lx_ioremap(offset, size, \
-		((flags) & MEMREMAP_WB) ? LX_MAP_WB : LX_MAP_WC))
+/* A range Haiku has mapped already with another caching (ACPI's mapping of
+ * firmware memory, the i915 OpRegion on the Yoga 11e) refuses a second
+ * mapping of another type: then it is mapped uncached, as ACPI's is. */
+static inline void *memremap(resource_size_t offset, size_t size,
+	unsigned long flags)
+{
+	void *address = (void *)lx_ioremap(offset, size,
+		(flags & MEMREMAP_WB) ? LX_MAP_WB : LX_MAP_WC);
+	if (address == NULL)
+		address = (void *)lx_ioremap(offset, size, LX_MAP_UC);
+	return address;
+}
 #define memunmap(addr)	lx_iounmap((void __iomem *)(addr))
 
 /* io-mapping: a mapped aperture, mapped once in full */
