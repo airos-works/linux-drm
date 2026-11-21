@@ -51,7 +51,9 @@ struct drm_haiku_device_info {
 	__u32 class_code;		/* base << 16 | sub << 8 | interface */
 	__u32 file_id[2];		/* low, high: the same for two descriptors of the
 							   same open file (one dup()ed from the other) */
-	__u32 reserved[2];
+	__u32 display_lost;		/* how often the display lost what it showed
+							   (a suspend to RAM): it has to be drawn again */
+	__u32 reserved;
 };
 
 /* 'd' 0xf0..0xff are free in the DRM core range */

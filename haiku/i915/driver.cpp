@@ -143,7 +143,8 @@ struct drm_haiku_device_info {
 	uint16	subdevice_id;
 	uint32	class_code;
 	uint32	file_id[2];
-	uint32	reserved[2];
+	uint32	display_lost;
+	uint32	reserved;
 };
 #ifdef I915_DRM_ARMED_ONLY
 // lab builds: closes the driver's own device file, so that devfs can unload
@@ -895,6 +896,8 @@ open_door()
 
 static bool sGPUsSleeping;
 static bool sGPUsSuspendedToRAM;
+static int32 sDisplayLost;
+	// suspends to RAM: what the screen showed is gone (DEVICE_INFO)
 
 
 /*!	Suspend to idle (state 0, ACPI_POWER_STATE_ON) puts the APUs' GPUs to
@@ -934,6 +937,7 @@ power_hook(void* cookie, bool resume, int32 state)
 		lx_glue_resume_deep();
 		lx_haiku_suspend_trace(false);
 		sGPUsSuspendedToRAM = false;
+		atomic_add(&sDisplayLost, 1);
 		open_door();
 	}
 	if (sGPUsSleeping) {
@@ -1086,6 +1090,7 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			return ENODEV;
 		info.minor = cookie->minor;
 		info.node_type = cookie->minor >= 128 ? 2 : 0;
+		info.display_lost = (uint32)atomic_get(&sDisplayLost);
 		// one cookie per open file: dup()ed descriptors share it
 		info.file_id[0] = (uint32)(addr_t)cookie;
 		info.file_id[1] = (uint32)((uint64)(addr_t)cookie >> 32);
