@@ -381,7 +381,7 @@ static inline const char *dev_name(const struct device *dev)
 {
 	if (dev->init_name)
 		return dev->init_name;
-	return dev->lx_name ? dev->lx_name : "amdgpu";
+	return dev->lx_name ? dev->lx_name : KBUILD_MODNAME;
 }
 int dev_set_name(struct device *dev, const char *name, ...) __printf(2, 3);
 static inline void *dev_get_drvdata(const struct device *dev)
@@ -392,7 +392,7 @@ static inline void dev_set_drvdata(struct device *dev, void *data)
 {
 	dev->driver_data = data;
 }
-#define dev_driver_string(dev)	"amdgpu"
+#define dev_driver_string(dev)	KBUILD_MODNAME
 #define dev_to_node(dev)		NUMA_NO_NODE
 #define set_dev_node(dev, node)	do { } while (0)
 #define dev_is_pci(dev)			1

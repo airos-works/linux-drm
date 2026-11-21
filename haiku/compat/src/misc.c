@@ -11,6 +11,7 @@
 #include <drm/drm_connector.h>
 #include <drm/drm_client.h>
 #include <drm/drm_utils.h>
+#include <drm/drm_file.h>
 
 
 int
@@ -220,15 +221,55 @@ drm_sysfs_minor_alloc(struct drm_minor *minor)
 		return ERR_PTR(-ENOMEM);
 	device_initialize(kdev);
 	kdev->release = lx_minor_kdev_release;
+	/* named as Linux's sysfs names it (i915 compares kobject names) */
+	if (minor->type == DRM_MINOR_RENDER)
+		dev_set_name(kdev, "renderD%d", minor->index);
+	else if (minor->type == DRM_MINOR_ACCEL)
+		dev_set_name(kdev, "accel%d", minor->index);
+	else
+		dev_set_name(kdev, "card%d", minor->index);
 	return kdev;
+}
+
+
+#ifdef LX_ADDON_I915
+
+/* i915 uses the connector's device (drm_connector::kdev), as Linux's sysfs
+ * makes one: its name in messages, the parent of the DP AUX channel's I2C
+ * adapter, the eDP panel's devres owner. A plain device here. */
+static void
+lx_connector_kdev_release(struct device *kdev)
+{
+	kfree(kdev);
 }
 
 
 int
 drm_sysfs_connector_add(struct drm_connector *connector)
 {
+	struct device *kdev;
+
+	if (connector->kdev != NULL)
+		return 0;
+	kdev = kzalloc(sizeof(*kdev), GFP_KERNEL);
+	if (kdev == NULL)
+		return -ENOMEM;
+	device_initialize(kdev);
+	kdev->parent = connector->dev->dev;
+	kdev->release = lx_connector_kdev_release;
+	dev_set_name(kdev, "card%d-%s", connector->dev->primary->index,
+		connector->name);
+	kdev->kobj.name = dev_name(kdev);
+	connector->kdev = kdev;
 	return 0;
 }
+#else
+int
+drm_sysfs_connector_add(struct drm_connector *connector)
+{
+	return 0;
+}
+#endif
 
 
 int
@@ -247,6 +288,14 @@ drm_sysfs_connector_remove_early(struct drm_connector *connector)
 void
 drm_sysfs_connector_remove(struct drm_connector *connector)
 {
+#ifdef LX_ADDON_I915
+	struct device *kdev = connector->kdev;
+	if (kdev == NULL)
+		return;
+	connector->kdev = NULL;
+	devres_release_all(kdev);
+	put_device(kdev);
+#endif
 }
 
 

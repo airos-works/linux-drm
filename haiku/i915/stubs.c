@@ -58,7 +58,7 @@ lx_i915_platform_init(struct pci_dev *pdev)
 		tsc_khz = (a & 0xffff) * 1000;
 	}
 
-	if (intel_graphics_stolen_res.end != 0
+	if (resource_size(&intel_graphics_stolen_res) != 0
 		|| pdev->vendor != PCI_VENDOR_ID_INTEL
 		|| pdev->bus->number != 0 || pdev->devfn != PCI_DEVFN(2, 0))
 		return;

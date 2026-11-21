@@ -12,7 +12,8 @@
 	trace_calls parameter is 1, when the driver stops (devfs unloads it)
 	when it is 2, and stays on. With 3 only threads that are closing a DRM
 	file are traced (lx_trace_close_begin() to lx_trace_close_end()), and
-	the close's steps are logged. */
+	the close's steps are logged. With 4 tracing is on from the start
+	(bring-up: where a first start stops; trace only a few files). */
 
 #include <lx/haiku.h>
 
@@ -118,7 +119,7 @@ __cyg_profile_func_enter(void *function, void *site)
 				- (unsigned long)__cyg_profile_func_enter);
 		return;
 	}
-	if (likely(!READ_ONCE(trace_active)))
+	if (likely(!READ_ONCE(trace_active)) && READ_ONCE(trace_calls) != 4)
 		return;
 	printk("T%d %lx\n", lx_haiku_current_thread(),
 		(unsigned long)function - (unsigned long)__cyg_profile_func_enter);
