@@ -33,6 +33,8 @@
 
 #include "i915_drv.h"
 #include "i915_driver.h"
+#include "display/intel_backlight.h"
+#include "display/intel_display_types.h"
 #include "gem/i915_gem_object.h"
 #include "userptr.h"
 #include "stubs.h"
@@ -2155,11 +2157,50 @@ lx_glue_scanout(void *_file, struct lx_glue_scanout_args *args)
 }
 
 
-/* DRM_HAIKU_IOCTL_BACKLIGHT: not yet for i915's panels */
+/* DRM_HAIKU_IOCTL_BACKLIGHT: the first built-in panel of the file's GPU,
+ * in the panel's own PWM steps (0..backlight.max); a negative brightness
+ * only asks. Set the way the OpRegion's ASLE backlight requests are
+ * (intel_opregion.c): i915 registers no backlight class device here
+ * (CONFIG_BACKLIGHT_CLASS_DEVICE would turn on drm_dp_helper's for every
+ * add-on). A level below the panel's minimum is raised to it. */
 int
 lx_glue_backlight(void *_file, int brightness, int *_level, int *_maximum)
 {
-	return -ENODEV;
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct drm_device *dev = file->minor->dev;
+	struct drm_connector_list_iter iter;
+	struct drm_connector *base;
+	int error = -ENODEV;
+
+	drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
+	drm_connector_list_iter_begin(dev, &iter);
+	drm_for_each_connector_iter(base, &iter) {
+		struct intel_connector *connector = to_intel_connector(base);
+		struct intel_panel *panel = &connector->panel;
+
+		if (!panel->backlight.present || panel->backlight.max == 0)
+			continue;
+
+		if (brightness >= 0) {
+			if (base->state == NULL || base->state->crtc == NULL) {
+				/* the panel is off: set_acpi would drop it */
+				error = -EAGAIN;
+				break;
+			}
+			intel_backlight_set_acpi(base->state,
+				min_t(u32, brightness, panel->backlight.max),
+				panel->backlight.max);
+		}
+		/* not "current": Linux's macro for the running task */
+		*_level = panel->backlight.level;
+		*_maximum = panel->backlight.max;
+		error = 0;
+		break;
+	}
+	drm_connector_list_iter_end(&iter);
+	drm_modeset_unlock(&dev->mode_config.connection_mutex);
+	return error;
 }
 
 
