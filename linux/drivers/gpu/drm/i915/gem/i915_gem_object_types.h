@@ -717,6 +717,10 @@ struct drm_i915_gem_object {
 			struct mmu_interval_notifier notifier;
 			struct page **pvec;
 			int page_ref;
+#ifdef __HAIKU_LINUX_COMPAT__
+			/* the wired user pages (haiku/i915/userptr.c) */
+			struct lx_userptr *lx;
+#endif
 		} userptr;
 #endif
 
