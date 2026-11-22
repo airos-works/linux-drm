@@ -80,11 +80,14 @@
 #endif
 
 /* The Intel add-on (make i915, haiku/i915): Linux's i915 with its Kconfig
- * defaults, without user pointers (MMU notifiers), PXP, GVT or error
- * capture. CONFIG_ACPI only for it: the OpRegion holds the VBT (the
- * board's outputs and panel), the rest of ACPI is stubbed. */
+ * defaults, without PXP, GVT or error capture. CONFIG_ACPI only for it:
+ * the OpRegion holds the VBT (the board's outputs and panel), the rest of
+ * ACPI is stubbed. CONFIG_MMU_NOTIFIER only for it too, and only for its
+ * user pointer objects (i915_gem_userptr.c), which wire their pages here
+ * instead of following them with a notifier. */
 #ifdef LX_ADDON_I915
 #define CONFIG_DRM_I915 1
+#define CONFIG_MMU_NOTIFIER 1
 #define CONFIG_DRM_I915_FORCE_PROBE ""
 #define CONFIG_DRM_I915_REQUEST_TIMEOUT 20000
 #define CONFIG_DRM_I915_FENCE_TIMEOUT 10000

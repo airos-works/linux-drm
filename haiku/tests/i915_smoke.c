@@ -11,7 +11,8 @@
 
 	stages: 1 open + getparam, 2 buffer object, 3 CPU map (WB), 4 CPU map
 	(WC), 5 store-dword batch on each engine, 6 1000 batches on each engine,
-	7 aperture (GTT) map, 8 aperture map of an X-tiled buffer (fence)
+	7 aperture (GTT) map, 8 aperture map of an X-tiled buffer (fence),
+	11 a user pointer object (the caller's memory), written by each engine
 
 	Built on the machine: gcc -O2 -o i915_smoke i915_smoke.c
 	-I<dir with drm.h, drm_haiku.h, i915_drm.h> */
@@ -409,6 +410,63 @@ main(int argc, char** argv)
 			&pread), data[1]);
 		close_bo(tiled2);
 
+	}
+	if (last < 11)
+		goto done;
+
+	{
+		/* what ANV's VK_EXT_external_memory_host is made of */
+		step("11 userptr: 64 KiB of a fully locked area");
+		uint32_t* memory = NULL;
+		area_id area = create_area("i915_smoke userptr", (void**)&memory,
+			B_ANY_ADDRESS, 65536, B_FULL_LOCK, B_READ_AREA | B_WRITE_AREA);
+		if (area < 0) {
+			step("11 create_area failed: %s", strerror(area));
+			goto done;
+		}
+		memset(memory, 0, 65536);
+
+		struct drm_i915_gem_userptr userptr = {};
+		userptr.user_ptr = (uintptr_t)memory + 1;
+		userptr.user_size = 4096;
+		step("11 GEM_USERPTR of an unaligned address: %d (wanted: %d)",
+			xioctl(DRM_IOCTL_I915_GEM_USERPTR, &userptr), -EINVAL);
+
+		userptr.user_ptr = (uintptr_t)memory;
+		userptr.user_size = 65536;
+		userptr.flags = I915_USERPTR_PROBE;
+		error = xioctl(DRM_IOCTL_I915_GEM_USERPTR, &userptr);
+		step("11 GEM_USERPTR with PROBE: %d, handle %u", error,
+			userptr.handle);
+		if (error != 0) {
+			userptr.flags = 0;
+			error = xioctl(DRM_IOCTL_I915_GEM_USERPTR, &userptr);
+			step("11 GEM_USERPTR without: %d, handle %u", error,
+				userptr.handle);
+		}
+		if (error == 0) {
+			for (unsigned e = 0; e < sizeof(kEngines) / sizeof(kEngines[0]);
+					e++) {
+				uint32_t value = 0x05e70000 | e;
+				memory[0] = 0;
+				wait_bo(batch);
+				error = store_dword(batch, batchMap, userptr.handle,
+					kEngines[e].flags, value);
+				step("11 store-dword into it on %s: submitted (%d)",
+					kEngines[e].name, error);
+				if (error != 0)
+					continue;
+				error = wait_bo(userptr.handle);
+				step("11 %s: wait %d, the memory reads %#x (%s)",
+					kEngines[e].name, error, memory[0],
+					memory[0] == value ? "ok" : "WRONG");
+			}
+			close_bo(userptr.handle);
+			step("11 closed; deleting the area (waits until the driver has "
+				"let go of its pages)");
+		}
+		delete_area(area);
+		step("11 area deleted");
 	}
 
 done:

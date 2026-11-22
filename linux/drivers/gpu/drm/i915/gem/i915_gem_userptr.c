@@ -43,6 +43,22 @@
 #include "i915_gem_object.h"
 #include "i915_scatterlist.h"
 
+#ifdef __HAIKU_LINUX_COMPAT__
+/*
+ * Haiku has no MMU notifiers and these objects need none here: their pages
+ * are wired when the object is made (haiku/i915/userptr.c, shared with
+ * amdgpu_drm and nouveau_drm) and stay wired until it is released. Haiku
+ * moves no wired page, so what submit_init() finds never changes and the
+ * notifier's sequence number stays what it was. The team is watched
+ * instead: when it dies the pages are let go of once the GPU is done with
+ * them, and the object cannot be used any more (-ESRCH).
+ * As for the other drivers, the memory has to stay mapped until the object
+ * is freed.
+ */
+#include <linux/hmm.h>
+#include "../../../../../../haiku/i915/userptr.h"
+#endif
+
 #ifdef CONFIG_MMU_NOTIFIER
 
 /**
@@ -69,11 +85,30 @@ static const struct mmu_interval_notifier_ops i915_gem_userptr_notifier_ops = {
 
 static int
 i915_gem_userptr_init__mmu_notifier(struct drm_i915_gem_object *obj)
+#ifdef __HAIKU_LINUX_COMPAT__
+{
+	int ret;
+
+	ret = lx_userptr_create(&obj->base, obj->userptr.ptr,
+				obj->base.size >> PAGE_SHIFT,
+				!i915_gem_object_is_readonly(obj), false,
+				&obj->userptr.lx);
+	if (ret)
+		return ret;
+
+	/* whose memory it is, as on Linux; nothing ever invalidates it */
+	obj->userptr.notifier.ops = &i915_gem_userptr_notifier_ops;
+	obj->userptr.notifier.mm = current->mm;
+	obj->userptr.notifier.invalidate_seq = 1;
+	return 0;
+}
+#else
 {
 	return mmu_interval_notifier_insert(&obj->userptr.notifier, current->mm,
 					    obj->userptr.ptr, obj->base.size,
 					    &i915_gem_userptr_notifier_ops);
 }
+#endif
 
 static void i915_gem_object_userptr_drop_ref(struct drm_i915_gem_object *obj)
 {
@@ -88,9 +123,12 @@ static void i915_gem_object_userptr_drop_ref(struct drm_i915_gem_object *obj)
 	GEM_BUG_ON(obj->userptr.page_ref < 0);
 
 	if (pvec) {
+#ifndef __HAIKU_LINUX_COMPAT__
 		const unsigned long num_pages = obj->base.size >> PAGE_SHIFT;
 
+		/* Haiku: the pages stay wired until the object is released */
 		unpin_user_pages(pvec, num_pages);
+#endif
 		kvfree(pvec);
 	}
 }
@@ -174,6 +212,13 @@ i915_gem_userptr_put_pages(struct drm_i915_gem_object *obj,
 	if (i915_gem_object_is_readonly(obj))
 		obj->mm.dirty = false;
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* Haiku: these are not page cache pages; unwiring them marks them
+	 * modified (haiku/i915/userptr.c)
+	 */
+	(void)sgt_iter;
+	(void)page;
+#else
 	for_each_sgt_page(page, sgt_iter, pages) {
 		if (obj->mm.dirty && trylock_page(page)) {
 			/*
@@ -200,6 +245,7 @@ i915_gem_userptr_put_pages(struct drm_i915_gem_object *obj,
 
 		mark_page_accessed(page);
 	}
+#endif
 	obj->mm.dirty = false;
 
 	sg_free_table(pages);
@@ -264,6 +310,23 @@ int i915_gem_object_userptr_submit_init(struct drm_i915_gem_object *obj)
 		gup_flags |= FOLL_WRITE;
 
 	pinned = 0;
+#ifdef __HAIKU_LINUX_COMPAT__
+	{
+		/* the pages wired when the object was made */
+		struct hmm_range *range;
+
+		(void)gup_flags;
+		ret = lx_userptr_get_pages(obj->userptr.lx, &range);
+		if (ret < 0)
+			goto out;
+		for (; pinned < num_pages; pinned++)
+			pvec[pinned] = hmm_pfn_to_page(range->hmm_pfns[pinned]);
+		if (!lx_userptr_get_pages_done(range)) {
+			ret = -ESRCH;
+			goto out;
+		}
+	}
+#else
 	while (pinned < num_pages) {
 		ret = pin_user_pages_fast(obj->userptr.ptr + pinned * PAGE_SIZE,
 					  num_pages - pinned, gup_flags,
@@ -273,6 +336,7 @@ int i915_gem_object_userptr_submit_init(struct drm_i915_gem_object *obj)
 
 		pinned += ret;
 	}
+#endif
 
 	ret = i915_gem_object_lock_interruptible(obj, NULL);
 	if (ret)
@@ -299,7 +363,9 @@ out_unlock:
 
 out:
 	if (pvec) {
+#ifndef __HAIKU_LINUX_COMPAT__
 		unpin_user_pages(pvec, pinned);
+#endif
 		kvfree(pvec);
 	}
 
@@ -347,6 +413,15 @@ static void
 i915_gem_userptr_release(struct drm_i915_gem_object *obj)
 {
 	GEM_WARN_ON(obj->userptr.page_ref);
+
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* the GPU is done with the pages: unwire them */
+	if (obj->userptr.lx) {
+		lx_userptr_detach(obj->userptr.lx);
+		lx_userptr_release(obj->userptr.lx);
+		obj->userptr.lx = NULL;
+	}
+#endif
 
 	if (!obj->userptr.notifier.mm)
 		return;
@@ -400,8 +475,10 @@ static int
 probe_range(struct mm_struct *mm, unsigned long addr, unsigned long len)
 #ifdef __HAIKU_LINUX_COMPAT__
 {
-	/* Haiku: no user pointer objects (no MMU notifiers) */
-	return -ENODEV;
+	/* Haiku: making the object wires the pages, and fails if it cannot
+	 * (device memory, or no memory there at all)
+	 */
+	return 0;
 }
 #else
 {
