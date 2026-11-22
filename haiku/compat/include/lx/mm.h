@@ -299,7 +299,6 @@ struct folio {
 #define folio_clear_reclaim(f)	do { } while (0)
 #define folio_mapped(f)		false
 #define folio_clear_dirty_for_io(f)	false
-#define __folio_batch_release(fb)	do { (fb)->nr = 0; } while (0)
 #define split_page(page, order)	do { } while (0)
 #define shmem_writeout(folio, plug, list)	(-ENOSYS)
 #define inode_set_bytes(inode, bytes)	do { } while (0)
@@ -332,7 +331,21 @@ struct folio_batch {
 #define folio_batch_count(fbatch)	((fbatch)->nr)
 #define folio_batch_add(fbatch, folio) \
 	((fbatch)->folios[(fbatch)->nr++] = (folio), 31 - (fbatch)->nr)
-#define folio_batch_release(fbatch)	do { (fbatch)->nr = 0; } while (0)
+/* Puts the batch's folios, as Linux does: i915 gives back every page of a
+ * shmem buffer this way (shmem_sg_free_table()), which leaves the page to the
+ * shmem file's own reference only, so that truncating or releasing the file
+ * frees it. Without the puts, every page of every buffer stayed allocated:
+ * ~300 MiB for each 4K film decoded on a Gemini Lake laptop with 4 GiB. */
+void put_page(struct page *page);
+static inline void
+folio_batch_release(struct folio_batch *fbatch)
+{
+	unsigned int i;
+	for (i = 0; i < fbatch->nr; i++)
+		folio_put(fbatch->folios[i]);
+	fbatch->nr = 0;
+}
+#define __folio_batch_release(fbatch)	folio_batch_release(fbatch)
 #define check_move_unevictable_folios(fbatch)	do { } while (0)
 
 struct page *lx_alloc_pages(gfp_t gfp, unsigned int order);
