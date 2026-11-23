@@ -160,7 +160,7 @@ chmod 755 "$drv/boot/post-install/amdgpu_drm-block-native.sh"
 cat > "$drv/documentation/packages/amdgpu_drm/README" <<EOF
 amdgpu_drm $driverVersion (linux-drm $commit): Linux $linuxVersion's amdgpu
 driver with the DRM core, TTM, the GPU scheduler and Display Core, running
-on Haiku through a Linux compatibility layer. Built against $haikuVersion.
+on Haiku through a Linux compatibility layer.
 
 Licence: GNU GPL v2 (the add-on combines GPL-2.0 and MIT sources). Its
 complete source is https://github.com/jmgasper/linux-drm at commit $commit

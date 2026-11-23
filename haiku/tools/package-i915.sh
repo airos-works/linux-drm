@@ -56,7 +56,7 @@ ln -s ../../bin/i915_drm "$drv/add-ons/kernel/drivers/dev/graphics/i915_drm"
 cat > "$drv/documentation/packages/i915_drm/README" <<EOF
 i915_drm $driverVersion (linux-drm $commit): Linux $linuxVersion's i915
 driver with the DRM core, running on Haiku through a Linux compatibility
-layer. Built against $haikuVersion.
+layer.
 
 Licence: MIT (i915) and GNU GPL v2 (the add-on combines GPL-2.0 and MIT
 sources). Its complete source is https://github.com/airos-works/linux-drm at

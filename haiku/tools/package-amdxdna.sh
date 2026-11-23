@@ -151,7 +151,7 @@ cp "$ROOT/haiku/amdxdna/launch" "$drv/data/launch/amdxdna"
 cat > "$drv/documentation/packages/amdxdna/README" <<EOF
 amdxdna $driverVersion (linux-drm $commit): Linux's amdxdna driver for the
 NPU of AMD Ryzen AI processors, with the DRM core, running on Haiku through
-a Linux compatibility layer. Built against $haikuVersion.
+a Linux compatibility layer.
 
 Licence: GNU GPL v2 (the add-on combines GPL-2.0 and MIT sources). Its
 complete source is https://github.com/airos-works/linux-drm at commit

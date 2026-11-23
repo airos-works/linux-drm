@@ -57,7 +57,7 @@ ln -s ../../bin/nouveau_drm "$drv/add-ons/kernel/drivers/dev/graphics/nouveau_dr
 cat > "$drv/documentation/packages/nouveau_drm/README" <<EOF
 nouveau_drm $driverVersion (linux-drm $commit): Linux $linuxVersion's nouveau
 driver with the DRM core and TTM, running on Haiku through a Linux
-compatibility layer. Built against $haikuVersion.
+compatibility layer.
 
 Licence: MIT (nouveau) and GNU GPL v2 (the add-on combines GPL-2.0 and MIT
 sources). Its complete source is https://github.com/airos-works/linux-drm at
