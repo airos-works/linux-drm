@@ -1207,6 +1207,20 @@ lx_haiku_area_free(void* address)
 // #pragma mark - physical pages
 
 
+/*	The physical page number of \a page. Kernels with haiku#215 compute it
+	from the page's place in their page array and no longer keep it in
+	struct vm_page; they have an out-of-line accessor for add-ons. */
+static inline page_num_t
+lx_page_number(const vm_page* page)
+{
+#ifdef HAVE_VM_PAGE_PHYSICAL_PAGE_NUMBER
+	return vm_page_physical_page_number(page);
+#else
+	return page->physical_page_number;
+#endif
+}
+
+
 extern "C" void*
 lx_haiku_pages_alloc(unsigned long count, unsigned long long maxAddress,
 	int clear, unsigned long long* physical)
@@ -1236,7 +1250,7 @@ lx_haiku_pages_alloc(unsigned long count, unsigned long long maxAddress,
 	// on any thread (TTM destroys busy buffers on a worker, for instance).
 	for (unsigned long i = 0; i < count; i++)
 		DEBUG_PAGE_ACCESS_END(&page[i]);
-	*physical = (unsigned long long)page->physical_page_number * B_PAGE_SIZE;
+	*physical = (unsigned long long)lx_page_number(page) * B_PAGE_SIZE;
 	return page;
 }
 
@@ -1245,7 +1259,7 @@ extern "C" void
 lx_haiku_pages_free(void* firstPage, unsigned long count)
 {
 	vm_page* page = (vm_page*)firstPage;
-	page_num_t first = page->physical_page_number;
+	page_num_t first = lx_page_number(page);
 	for (unsigned long i = 0; i < count; i++) {
 		vm_page* current = i == 0 ? page : vm_lookup_page(first + i);
 		if (current == NULL)
@@ -1313,7 +1327,7 @@ lx_haiku_pages_alloc_at(unsigned long first, unsigned long count, int clear,
 	// see lx_haiku_pages_alloc()
 	for (unsigned long i = 0; i < count; i++)
 		DEBUG_PAGE_ACCESS_END(&page[i]);
-	*physical = (unsigned long long)page->physical_page_number * B_PAGE_SIZE;
+	*physical = (unsigned long long)lx_page_number(page) * B_PAGE_SIZE;
 	return page;
 }
 
@@ -1334,7 +1348,7 @@ lx_haiku_page_run_alloc(unsigned long count, unsigned long long alignment,
 	// see lx_haiku_pages_alloc()
 	for (unsigned long i = 0; i < count; i++)
 		DEBUG_PAGE_ACCESS_END(&page[i]);
-	*physical = (unsigned long long)page->physical_page_number * B_PAGE_SIZE;
+	*physical = (unsigned long long)lx_page_number(page) * B_PAGE_SIZE;
 	return page;
 }
 
